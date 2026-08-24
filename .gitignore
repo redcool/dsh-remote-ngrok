@@ -1,0 +1,8 @@
+# ===== 运行时产物 / 大文件 —— 不提交 =====
+# ngrok 二进制与日志（首次使用自行下载 ngrok.exe 放入本目录，见 README「ngrok 下载」）
+ngrok/ngrok.exe
+ngrok/*.log
+ngrok/ngrok_err.log
+
+# proxy 依赖（package.json 已声明，clone 后 npm install）
+proxy/node_modules/
