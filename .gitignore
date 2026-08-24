@@ -1,8 +1,9 @@
-# ===== 运行时产物 / 大文件 —— 不提交 =====
-# ngrok 二进制与日志（首次使用自行下载 ngrok.exe 放入本目录，见 README「ngrok 下载」）
-ngrok/ngrok.exe
-ngrok/*.log
-ngrok/ngrok_err.log
+# ===== 运行时产物 / 大文件 / 私密 —— 不提交 =====
+# ngrok 整个目录（exe/日志/README 合并到外层后不再需要子 README）
+ngrok/
+
+# ngrok authtoken（真 token，勿提交；提交的是 ngrok_token.txt.temp 模板）
+ngrok_token.txt
 
 # proxy 依赖（package.json 已声明，clone 后 npm install）
 proxy/node_modules/

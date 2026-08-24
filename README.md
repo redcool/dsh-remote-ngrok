@@ -18,8 +18,9 @@
 | `start_dsh_web_remote.ps1` | 只重启 dsh web 并携带 `--trusted-host <ngrok域名>` |
 | `start_dsh_web_remote.bat` | 双击入口（调 ps1） |
 | `proxy/server.js` | 反向代理：cookie 会话认证 + polyfill 注入 + Origin 剥离（**需先设环境变量**） |
-| `proxy/package.json` | proxy 依赖声明（`npm install` 时安装 http-proxy） |
-| `ngrok/` | **ngrok.exe 存放目录（git 忽略，首次使用自行下载放入，见下）** |
+| `proxy/package.json` | proxy 依赖声明（`npm install http-proxy`） |
+| `ngrok_token.txt.temp` | **ngrok authtoken 模板**：复制为 `ngrok_token.txt` 后填入自己的 token（见「ngrok 配置」） |
+| `ngrok/` | **运行目录（git 忽略）**：ngrok.exe 首次使用自行下载放入；运行时生成日志 |
 
 ## 首次使用（部署）
 
@@ -44,19 +45,22 @@ setx DSH_PROXY_PASSWORD "换成你的强密码"
 
 **登录**：浏览器打开 ngrok URL → 登录页输入 `DSH_PROXY_USER / DSH_PROXY_PASSWORD`。
 
-## ngrok 下载
+## ngrok 下载与配置
 
-> ngrok.exe（约 30MB）**不随仓库提交**（git 忽略 `ngrok/ngrok.exe` 与日志）。首次使用手动下载放入 `ngrok\` 目录：
+> **ngrok.exe（约 30MB）与 authtoken 不随仓库提交**。首次使用：
 
-**Windows x64 稳定版（v3.39+，推荐）：**
+**① 下载 ngrok.exe（Windows x64，v3.39+）**，解压出 `ngrok.exe` 放入本目录 `ngrok\`：
 ```
 https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip
 ```
-解压出 `ngrok.exe` 放到本目录 `ngrok\` 下即可。
-
-- 为什么不用旧版：winget 渠道的 v3.3.1 **读不懂新版 `version:"3"` 配置文件**，启动即秒退。务必备 v3.39+。
+- 为什么必须 v3.39+：winget 渠道的 v3.3.1 **读不懂新版 `version:"3"` 配置文件**，启动即秒退。
 - 官方下载页（备选）：https://ngrok.com/download
-- `start_remote_all.ps1` 检测到 `ngrok\ngrok.exe` 缺失时会提示下载地址。
+
+**② 配置 authtoken**（`start_remote_all.bat` 启动时会自动处理，也可手动）：
+- 复制 `ngrok_token.txt.temp` → 改名 `ngrok_token.txt` → 填入你的 token（https://dashboard.ngrok.com → Your Authtoken）
+- 或直接运行 `start_remote_all.bat`：检测到缺失/无效 token 时会**交互询问**，粘贴即保存
+- token 通过 `NGROK_AUTHTOKEN` 环境变量传给 ngrok（优先于全局配置，不改动你机器上的 ngrok.yml）
+- 首次还需静态域名：`--url=happier-custodian-hastily.ngrok-free.dev` 已写死在脚本；换成你自己的静态域名后，同步改 `$ngrokHost`（trusted-host 会随之生效）
 
 ## ⚠ 两个踩过的坑（2026-08-24）
 

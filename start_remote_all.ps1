@@ -1,8 +1,9 @@
 # ============================================================
 # DSH 远程访问 · 一键拉起（proxy + ngrok + dsh web 全链路）
-# 用法：双击 start_remote_all.bat（或在 dshTools 目录跑本 ps1）
+# 用法：双击 start_remote_all.bat（或在本目录跑本 ps1）
 # 链路：手机/浏览器 → ngrok(TLS) → dsh-proxy(127.0.0.1:3200) → dsh web(127.0.0.1:3080)
 # 幂等：已在跑的组件不重启（页面不断线），缺哪个补哪个
+# ngrok token：读 ngrok_token.txt（模板 ngrok_token.txt.temp 复制改名后填入）；缺失/无效则询问
 # ============================================================
 
 $ErrorActionPreference = 'Continue'
@@ -23,6 +24,37 @@ function Test-PortListen([int]$port) {
   return $null -ne (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
 }
 
+## ngrok authtoken 校验：非空、非占位、非 URL、形似 token（≥20 位 base62+下划线）
+function Test-NgrokToken([string]$t) {
+  $t = $t.Trim()
+  if ($t.Length -lt 20) { return $false }
+  if ($t -match '://') { return $false }
+  if ($t -match 'YOUR_|TODO|example|示例|REPLACE') { return $false }
+  if ($t -notmatch '^[A-Za-z0-9_\-]{20,}$') { return $false }
+  return $true
+}
+
+## 读 ngrok_token.txt；缺失/无效则交互询问（有效才写回文件）
+function Get-NgrokToken {
+  $tokFile = Join-Path $toolsDir "ngrok_token.txt"
+  $token = ""
+  if (Test-Path $tokFile) { $token = ([System.IO.File]::ReadAllText($tokFile)).Trim() }
+  if (Test-NgrokToken $token) { return $token }
+  Write-Host ""
+  Write-Host "──────────────────────────────────────────────" -ForegroundColor Cyan
+  Write-Host " 需要 ngrok authtoken（当前文件缺失或无效）" -ForegroundColor Yellow
+  Write-Host " 1) 打开 https://dashboard.ngrok.com → Your Authtoken，复制" -ForegroundColor Gray
+  Write-Host " 2) 粘贴到下面："
+  $token = (Read-Host " authtoken").Trim()
+  if (Test-NgrokToken $token) {
+    [System.IO.File]::WriteAllText($tokFile, $token, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "[+] 已保存到 $tokFile" -ForegroundColor Green
+    return $token
+  }
+  Write-Host "[!] 输入不像有效 authtoken；ngrok 将用本机既有配置，可能失败" -ForegroundColor Red
+  return ""
+}
+
 # ① dsh-proxy（3200：cookie 会话认证 + iOS polyfill + Origin 剥离——手机能用的关键层）
 if (Test-PortListen 3200) {
   Write-Host "[*] proxy 已在跑（3200）— 跳过"
@@ -39,6 +71,8 @@ if (Test-PortListen 4040) {
 } else {
   if (-not (Test-Path $ngrokExe)) { Write-Host "[!] 缺 $ngrokExe —— 首次使用请到 https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip 下载 v3.39+ 并解压放入 ngrok\ 目录（详见 README.md「ngrok 下载」节）" -ForegroundColor Red }
   else {
+    $ngrokToken = Get-NgrokToken
+    if ($ngrokToken) { $env:NGROK_AUTHTOKEN = $ngrokToken }  # 子进程继承，优先于配置文件
     Write-Host "[*] 启动 ngrok → 3200（静态域名 $ngrokHost）..."
     Start-Process -FilePath $ngrokExe -ArgumentList "http","3200","--url=$ngrokHost","--log=stdout" -WindowStyle Hidden `
       -RedirectStandardOutput (Join-Path $toolsDir "ngrok\ngrok.log") -RedirectStandardError (Join-Path $toolsDir "ngrok\ngrok_err.log")
@@ -46,7 +80,10 @@ if (Test-PortListen 4040) {
     try {
       $t = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 8
       $t.tunnels | ForEach-Object { Write-Host ("[+] ngrok: {0} → {1}" -f $_.public_url, $_.config.addr) }
-    } catch { Write-Host "[!] ngrok 未就绪（看 ngrok\ngrok_err.log）" -ForegroundColor Red }
+    } catch {
+      Write-Host "[!] ngrok 未就绪（看 ngrok\ngrok_err.log；内存不足/authtoken 无效都会这样）" -ForegroundColor Red
+      Get-Content (Join-Path $toolsDir "ngrok\ngrok_err.log") -Tail 3 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   $_" -ForegroundColor DarkGray }
+    }
   }
 }
 
@@ -69,7 +106,7 @@ if (-not $webOk) {
   Start-Process -FilePath "node" -ArgumentList (Join-Path $dshtmWebDir "node_modules\.bin\dsh") , "web", "--port", "3080", `
     "--trusted-host", $ngrokHost, "--no-open" -WorkingDirectory $dshtmWebDir -WindowStyle Hidden
   Start-Sleep -Seconds 5
-  if (Test-PortListen 3080) { Write-Host "[+] dsh web 3080 在线" } else { Write-Host "[!] dsh web 未起来（手动跑 start_dsh_web_remote.bat 看输出）" -ForegroundColor Red }
+  if (Test-PortListen 3080) { Write-Host "[+] dsh web 3080 在线" } else { Write-Host "[!] dsh web 未起来（手动检查 DSH 目录/端口占用）" -ForegroundColor Red }
 }
 
 Write-Host ""
