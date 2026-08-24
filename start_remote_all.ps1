@@ -31,8 +31,10 @@ if (Test-Path $cfgFile) {
 if (-not $script:dshInstallDir) { Write-Host "[!] config.json 缺少 dsh_install_dir（DSH 安装位置）——请复制 config.json.temp 为 config.json 并填写" -ForegroundColor Red }
 # ========== 配置区结束 ==========
 
-# ngrok 静态域名（优先 config.json 的 ngrok_host；为空则用默认）
-$ngrokHost = if ($script:ngrokHost) { $script:ngrokHost } else { "happier-custodian-hastily.ngrok-free.dev" }
+# ngrok 域名策略：config.json 填了 ngrok_host（注册 ngrok 免费送的 .ngrok-free.dev 静态域名）→ 用静态域名（固定 URL）；
+# 留空 → ngrok 自动分配临时随机域名（每次会话会变，但保证立刻能用），启动后打印真实 URL。
+# 任何情况下，trusted-host 都以 ngrok API 查到的真实公网域名为准（静态/随机统一）。
+$ngrokHost = $script:ngrokHost   # 可能为空 = 随机域名
 $ngrokExe  = Join-Path $toolsDir "ngrok\ngrok.exe"
 $proxyDir  = Join-Path $toolsDir "proxy"
 
@@ -45,6 +47,15 @@ if (-not $env:DSH_PROXY_USER -or -not $env:DSH_PROXY_PASSWORD) {
 
 function Test-PortListen([int]$port) {
   return $null -ne (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+## 从 ngrok 本地 API 取当前隧道公网 URL（静态域名 / 随机域名统一入口）
+function Get-TunnelUrl {
+  try {
+    $t = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 8
+    if ($t.tunnels -and $t.tunnels.Count -gt 0) { return [string]$t.tunnels[0].public_url }
+  } catch { }
+  return ""
 }
 
 ## authtoken 校验：非空、非占位、非 URL、形似 token（≥20 位 base62+下划线）
@@ -104,26 +115,36 @@ if (Test-PortListen 4040) {
   } else {
     $tok = Get-NgrokToken
     if ($tok) { $env:NGROK_AUTHTOKEN = $tok }  # 子进程继承，优先于全局配置
-    Write-Host "[*] 启动 ngrok → 3200（静态域名 $ngrokHost）..."
-    Start-Process -FilePath $ngrokExe -ArgumentList "http","3200","--url=$ngrokHost","--log=stdout" -WindowStyle Hidden `
+    if ($ngrokHost) {
+      Write-Host "[*] 启动 ngrok → 3200（静态域名 $ngrokHost）..."
+      $ngrokArgs = @("http","3200","--url=$ngrokHost","--log=stdout")
+    } else {
+      Write-Host "[*] 启动 ngrok → 3200（config 未填 ngrok_host，用临时随机域名）..."
+      $ngrokArgs = @("http","3200","--log=stdout")
+    }
+    Start-Process -FilePath $ngrokExe -ArgumentList $ngrokArgs -WindowStyle Hidden `
       -RedirectStandardOutput (Join-Path $toolsDir "ngrok\ngrok.log") -RedirectStandardError (Join-Path $toolsDir "ngrok\ngrok_err.log")
     Start-Sleep -Seconds 8
-    try {
-      $t = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 8
-      $t.tunnels | ForEach-Object { Write-Host ("[+] ngrok: {0} → {1}" -f $_.public_url, $_.config.addr) }
-    } catch {
-      Write-Host "[!] ngrok 未就绪（看 ngrok\ngrok_err.log；authtoken 无效/内存不足都会这样）" -ForegroundColor Red
-      Get-Content (Join-Path $toolsDir "ngrok\ngrok_err.log") -Tail 3 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   $_" -ForegroundColor DarkGray }
-    }
   }
+}
+# 统一取当前隧道公网 URL（静态/随机都走这里）
+$script:tunnelUrl = Get-TunnelUrl
+if ($script:tunnelUrl) {
+  Write-Host "[+] ngrok: $($script:tunnelUrl) → http://127.0.0.1:3200"
+  if (-not $ngrokHost) { Write-Host "    提示：注册 ngrok 免费送 .ngrok-free.dev 静态域名，填入 config.json 的 ngrok_host 可固定 URL" -ForegroundColor DarkGray }
+} else {
+  Write-Host "[!] ngrok 未就绪（看 ngrok\ngrok_err.log；authtoken 无效/内存不足都会这样）" -ForegroundColor Red
+  Get-Content (Join-Path $toolsDir "ngrok\ngrok_err.log") -Tail 3 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   $_" -ForegroundColor DarkGray }
 }
 
 # ③ dsh web（3080：带 --trusted-host 前台运行——bat 窗口即宿主，关窗 = 关 dsh）
+# trusted-host 以 ngrok 真实公网域名为准（随机域名下 config 的 ngrok_host 可能为空）
+$tunnelHost = if ($script:tunnelUrl) { ([uri]$script:tunnelUrl).Host } else { $ngrokHost }
 $webOk = $false
 $conn = Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($conn) {
   $cmdline = (Get-CimInstance Win32_Process -Filter "ProcessId = $($conn.OwningProcess)" -ErrorAction SilentlyContinue).CommandLine
-  if ($cmdline -and $cmdline.Contains($ngrokHost)) {
+  if ($tunnelHost -and $cmdline -and $cmdline.Contains($tunnelHost)) {
     Write-Host "[*] dsh web 已在跑且 trusted-host 匹配 — 跳过"
     $webOk = $true
   } else {
@@ -139,7 +160,7 @@ if (-not $webOk) {
     Write-Host ""
     Write-Host "==================================================" -ForegroundColor Cyan
     Write-Host " 启动 dsh web → 本窗口即宿主（关闭本窗口 = 关闭 dsh）"
-    Write-Host " 公网: https://$ngrokHost  （登录 $env:DSH_PROXY_USER）"
+    Write-Host " 公网: $($script:tunnelUrl)  （登录 $env:DSH_PROXY_USER）"
     Write-Host " 本机: http://127.0.0.1:3080"
     Write-Host "==================================================" -ForegroundColor Cyan
     Write-Host ""
@@ -148,9 +169,9 @@ if (-not $webOk) {
     if ($script:dshHome) { $env:DSH_HOME = $script:dshHome }
     if (Test-Path $shim) {
       # 前台调用 dsh.cmd（cmd 包装 → node）：阻塞在本窗口，关窗 = 终止进程树 = 关 dsh
-      & $shim web --port 3080 --trusted-host $ngrokHost --no-open
+      & $shim web --port 3080 --trusted-host $tunnelHost --no-open
     } else {
-      node (Join-Path $script:dshInstallDir "node_modules\@deepseek-ai\dsh\lib\bin.js") web --port 3080 --trusted-host $ngrokHost --no-open
+      node (Join-Path $script:dshInstallDir "node_modules\@deepseek-ai\dsh\lib\bin.js") web --port 3080 --trusted-host $tunnelHost --no-open
     }
     # dsh 退出后（窗口被关/手动 Ctrl+C）回到这里
     Write-Host "[*] dsh web 已停止" -ForegroundColor DarkGray
@@ -159,7 +180,7 @@ if (-not $webOk) {
 
 Write-Host ""
 Write-Host "=================================================="
-Write-Host " 手机/浏览器访问: https://$ngrokHost"
+if ($script:tunnelUrl) { Write-Host " 手机/浏览器访问: $($script:tunnelUrl)" } else { Write-Host " 手机/浏览器访问: （ngrok 未就绪，见上方日志）" -ForegroundColor Red }
 Write-Host " 登录: $env:DSH_PROXY_USER / $env:DSH_PROXY_PASSWORD"
 Write-Host " （凭据可用 setx DSH_PROXY_USER / DSH_PROXY_PASSWORD 改）"
 Write-Host "=================================================="

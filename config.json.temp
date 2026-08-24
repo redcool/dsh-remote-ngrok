@@ -1,8 +1,8 @@
 {
   "ngrok_token": "YOUR_NGROK_TOKEN_HERE",
-  "dsh_install_dir": "DSH 安装位置（对应环境变量约 DSH_INSTALL_DIR），如 H:/AI/dsh",
-  "dsh_home": "DSH 数据目录（对应环境变量 DSH_HOME），如 C:/Users/Admin/.dsh",
-  "ngrok_host": "ngrok 静态域名（可留空则用脚本默认）",
+  "dsh_install_dir": "DSH 安装位置（约对应环境变量 DSH_INSTALL_DIR），如 /Users/you/dsh 或 H:/AI/dsh",
+  "dsh_home": "DSH 数据目录（对应环境变量 DSH_HOME），如 /Users/you/.dsh",
+  "ngrok_host": "（推荐填）你的 ngrok 静态域名：注册 ngrok 免费送一个 xxx.ngrok-free.dev，在 dashboard.ngrok.com -> Domains 查看/申请；留空则用临时随机域名（URL 每次会变）",
   "proxy_user": "proxy 登录用户名（可留空；对应环境变量 DSH_PROXY_USER）",
   "proxy_password": "proxy 登录密码（可留空；对应环境变量 DSH_PROXY_PASSWORD）"
 }
