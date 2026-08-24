@@ -137,9 +137,9 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 ## 9. proxy 实现要点（server.js 设计备忘）
 
 - **会话**：内存 Map（token→过期时间），Set-Cookie `dsh_session` HttpOnly SameSite=Lax，24h；>256 条时惰性清理过期（防无限增长）。
-- **登录防爆破**：连续失败 >5 次 → 延迟 1s（每来源计数，5 分钟窗口自清）。
-- **兼容 basic-auth**：`Authorization: Basic <user:pass>` 命中直接放行（浏览器记住的旧凭据也能进）。
-- **响应注入**：`selfHandleResponse:true` 手动回写；HTML 缓冲 → `</head>` 前插 `<script>` polyfill → **重算 `content-length`**（否则截断）；其他类型原样 pipe；上游流异常兜底销毁连接防挂起。
+- **登录防爆破**：连续失败 >5 次 → 延迟 1s（每来源计数，5 分钟窗口自清）。来源取 `X-Forwarded-For`（ngrok 场景 socket 端恒为 127.0.0.1，XFF 才是真实客户端 ip）。
+- **兼容 basic-auth**：`Authorization: Basic <user:pass>` 命中直接放行（浏览器记住的旧凭据也能进）；用 `crypto.timingSafeEqual` 恒定时间比较（防时序侧信道）。
+- **响应注入**：`selfHandleResponse:true` 手动回写；HTML 缓冲 → `</head>` 前插 `<script>` polyfill（**无条件注入**——polyfill 幂等，勿用 `includes('AbortSignal')` 做 guard，页面含该字样会跳过注入）→ **重算 `content-length`**（否则截断）；其他类型原样 pipe；上游流异常兜底销毁连接防挂起。
 - **WS 转发**：`upgrade` 事件 → 校验 cookie（无 → 403 应用层拒绝，不带 WWW-Authenticate，不弹框）→ `proxy.ws` 转发；同样剥离 Origin。
 - **polyfill 内容**：AbortSignal.any/timeout、Promise.withResolvers、URL.canParse、Object.hasOwn、Array.at/findLast/findLastIndex。
 - **密码不硬编码**：`DSH_PROXY_USER` / `DSH_PROXY_PASSWORD` 环境变量读取，未设置则拒绝启动。
@@ -160,7 +160,8 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 
 ## 12. 变更记录
 
-- **v6（2026-08-24）**：config.json 字段改名对齐环境变量语义——`dshtmWebDir→dsh_install_dir`、`dshtmHome→dsh_home`、`ngrokHost→ngrok_host`、`proxyUser→proxy_user`、`proxyPassword→proxy_password`（见名知意，新用户友好）；config.json 补齐全部字段（proxy 凭据从 setx 环境变量同步）。
+- **v7（2026-08-24）**：提交前复查——polyfill 无条件注入（修 `AbortSignal` guard 隐患）、basic-auth 改用 timingSafeEqual、防爆破来源取 X-Forwarded-For（ngrok 下才有效）、删 ps1 死代码；proxy 逻辑单测通过（401/限速/502）。
+- **v6**：config.json 字段改名对齐环境变量语义——`dshtmWebDir→dsh_install_dir`、`dshtmHome→dsh_home`、`ngrokHost→ngrok_host`、`proxyUser→proxy_user`、`proxyPassword→proxy_password`（见名知意，新用户友好）；config.json 补齐全部字段（proxy 凭据从 setx 环境变量同步）。
 - **v5**：代码审查加固——dshtmHome 生效（DSH_HOME 环境变量）、ngrokHost/proxy 凭据纳入 config.json（去硬编码）、_Save-CfgToken 保留其他字段、前窗宿主语义（关窗=关 dsh）、proxy 加登录防爆破/会话清理/流错误兜底。
 - **v4**：合并手册与 README 为单文档；补 Node.js 安装说明；`start_dsh_web_remote.*` 删除（并入一键脚本）；ngrok authtoken 走 config.json + 交互询问流程；`ngrok/` 整目录 git 忽略。
 - v3：解决 content-length 截断 bug + 剥离 Origin 头绕开 fence 严格同源判定 + 扩展 polyfill → 手机/远程全功能验证通过。密码改环境变量配置。

@@ -49,6 +49,12 @@ function sessionOk(req) {
 
 // ---------- 登录防爆破：同一来源连续失败 >5 次 → 延迟 1s（内存计数，重启即清零） ----------
 const failCount = new Map(); // 来源 -> 连续失败次数
+// ngrok 场景 socket.remoteAddress 恒为 127.0.0.1（本地转发）→ 取 X-Forwarded-For 才是真实客户端 ip
+function clientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return String(xff).split(',')[0].trim();
+  return (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+}
 function tooManyFails(ip) {
   const n = failCount.get(ip) || 0;
   if (n >= 5) return true;
@@ -58,10 +64,15 @@ function tooManyFails(ip) {
 function recordFail(ip) { failCount.set(ip, (failCount.get(ip) || 0) + 1); }
 
 // ---------- basic-auth 兼容（浏览器记住的旧凭据也能进） ----------
+function safeEqual(a, b) {
+  const ba = Buffer.from(a), bb = Buffer.from(b);
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
 function basicOk(req) {
   const h = req.headers['authorization'] || '';
-  const want = 'Basic ' + Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
-  return h === want;
+  if (!h.startsWith('Basic ')) return false;
+  return safeEqual(h.slice(6), Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64'));
 }
 
 // ---------- 登录页 ----------
@@ -135,11 +146,10 @@ const POLYFILL = `(function(){
 
 function injectPolyfill(html) {
   const tag = `<script>${POLYFILL}<\/script>`;
-  if (!html.includes('AbortSignal')) {
-    if (html.includes('</head>')) return html.replace('</head>', tag + '</head>');
-    return tag + html;
-  }
-  return html;
+  // 无条件注入（polyfill 幂等：每个 API 都有 typeof 守卫，重复注入无害）。
+  // 不要用 html.includes('AbortSignal') 做 guard：页面本身含该字样会跳过注入 → iOS 老设备复发。
+  if (html.includes('</head>')) return html.replace('</head>', tag + '</head>');
+  return tag + html;
 }
 
 // ---------- 请求处理 ----------
@@ -151,7 +161,7 @@ const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
-      const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+      const ip = clientIp(req);
       const sp = new URLSearchParams(body);
       const ok = sp.get('u') === USERNAME && sp.get('p') === PASSWORD;
       if (ok) {

@@ -33,7 +33,6 @@ if (-not $script:dshInstallDir) { Write-Host "[!] config.json 缺少 dsh_install
 
 # ngrok 静态域名（优先 config.json 的 ngrok_host；为空则用默认）
 $ngrokHost = if ($script:ngrokHost) { $script:ngrokHost } else { "happier-custodian-hastily.ngrok-free.dev" }
-$script:defaultHost = "happier-custodian-hastily.ngrok-free.dev"
 $ngrokExe  = Join-Path $toolsDir "ngrok\ngrok.exe"
 $proxyDir  = Join-Path $toolsDir "proxy"
 
