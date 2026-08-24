@@ -1,0 +1,8 @@
+{
+  "ngrok_token": "YOUR_NGROK_TOKEN_HERE",
+  "dshtmWebDir": "dsh 安装位置, 如 H:/AI/dsh",
+  "dshtmHome": "DSH 数据目录, 默认 C:/Users/Admin/.dsh",
+  "ngrokHost": "ngrok 静态域名（可留空则用脚本默认）",
+  "proxyUser": "proxy 登录用户名（可留空；优先用 setx DSH_PROXY_USER）",
+  "proxyPassword": "proxy 登录密码（可留空；优先用 setx DSH_PROXY_PASSWORD）"
+}

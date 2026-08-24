@@ -48,10 +48,11 @@ mcp server → bridge_godot / bridge_unity
 | 文件 | 作用 |
 |---|---|
 | `README.md` | 本文件（完整手册：环境/部署/使用/验证/排障） |
-| **`start_remote_all.bat/.ps1`** | **一键拉起全链路**（proxy+ngrok+dsh web，幂等：在跑的不重启）——**日常用这个** |
+| **`start_remote_all.bat/.ps1`** | **一键拉起全链路**（proxy+ngrok+dsh web，幂等：在跑的不重启；**本窗口即 dsh web 宿主，关窗 = 关 dsh**）——**日常用这个** |
 | `proxy/server.js` | 反向代理：cookie 会话认证 + polyfill 注入 + Origin 剥离（需环境变量，见 §5 ②） |
 | `proxy/package.json` | proxy 依赖声明（`npm install http-proxy`） |
-| `ngrok_token.txt.temp` | **ngrok authtoken 模板**：复制为 `ngrok_token.txt` 后填入自己的 token（见 §4 ②） |
+| `config.json.temp` | **配置模板**（git 提交）：复制为 `config.json` 后填 ngrok token / dsh 路径 / proxy 凭据（见 §4 ②） |
+| `config.json` | **本机配置（git 忽略）**：ngrok_token、dshtmWebDir、dshtmHome、ngrokHost、proxyUser/proxyPassword |
 | `ngrok/` | **运行目录（git 忽略）**：ngrok.exe 首次使用自行下载放入；运行时生成日志 |
 
 ## 4. ngrok 下载与配置
@@ -66,7 +67,9 @@ https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip
 - 官方下载页（备选）：https://ngrok.com/download
 
 **② 配置 authtoken**（`start_remote_all.bat` 启动时自动处理）：
-- 复制 `ngrok_token.txt.temp` → 改名 `ngrok_token.txt` → 填入你的 token（https://dashboard.ngrok.com → Your Authtoken）
+- 复制 `config.json.temp` → 改名 `config.json` → 填：`ngrok_token`（https://dashboard.ngrok.com → Your Authtoken）、`dshtmWebDir`（dsh 安装位置）、`dshtmHome`（dsh 数据目录）、可选 `ngrokHost`（静态域名）、`proxyUser/proxyPassword`（proxy 登录凭据）
+- 或直接运行 `start_remote_all.bat`：检测到 token 缺失/无效时**交互询问**，粘贴即写回 `config.json`
+- token 通过 `NGROK_AUTHTOKEN` 环境变量传给 ngrok（优先于全局配置，**不改动你机器上的 ngrok.yml**）
 - 或直接运行 `start_remote_all.bat`：检测到缺失/无效 token 时**交互询问**，粘贴即保存
 - token 通过 `NGROK_AUTHTOKEN` 环境变量传给 ngrok（优先于全局配置，**不改动你机器上的 ngrok.yml**）
 
@@ -83,12 +86,11 @@ npm install http-proxy
 setx DSH_PROXY_USER "dsh"
 setx DSH_PROXY_PASSWORD "换成你的强密码"
 
-# ③ 下载 ngrok.exe（§4①）→ 配置 authtoken（§4②）
-# ④ 检查本机 dsh 安装位置（start_remote_all.ps1 顶部 $dshtmWebDir / $dshtmHome）
-#    申请静态域名后改 $ngrokHost（§4③）
-
+# ③ 下载 ngrok.exe（§4①）
+# ④ 复制 config.json.temp → config.json，填 ngrok_token / dshtmWebDir / dshtmHome（§4②）
+#    静态域名可选填 ngrokHost 字段（§4③）
 # ⑤ 一键拉起
-# 双击 start_remote_all.bat
+# 双击 start_remote_all.bat（窗口即 dsh web 宿主；关闭窗口 = 关闭 dsh）
 ```
 
 **登录**：浏览器打开 ngrok URL → 登录页输入 `DSH_PROXY_USER / DSH_PROXY_PASSWORD`。
@@ -101,9 +103,9 @@ setx DSH_PROXY_PASSWORD "换成你的强密码"
 | 操作 | 做法 |
 |---|---|
 | 开机/断链后拉起 | 双击 `start_remote_all.bat`（幂等：已在跑的不重启，页面不断线） |
-| 只重启 dsh web | 重跑 `start_remote_all.bat` 即可（trusted-host 不匹配时会自动重启 dsh web） |
+| 停止 dsh web | 直接关闭 bat 窗口（窗口即 dsh web 宿主，关窗 = 进程树终止 = 关 dsh） |
 | 查当前隧道 URL | `(Invoke-RestMethod http://127.0.0.1:4040/api/tunnels).tunnels[0].public_url` |
-| 换静态域名 | 改脚本 `$ngrokHost` → 重跑一键脚本 |
+| 换静态域名 | 改 config.json 的 `ngrokHost` → 重跑一键脚本 |
 
 ## 7. 验证命令（本机快速自检）
 
@@ -136,16 +138,17 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 
 ## 9. proxy 实现要点（server.js 设计备忘）
 
-- **会话**：内存 Map（token→过期时间），Set-Cookie `dsh_session` HttpOnly SameSite=Lax，24h。
+- **会话**：内存 Map（token→过期时间），Set-Cookie `dsh_session` HttpOnly SameSite=Lax，24h；>256 条时惰性清理过期（防无限增长）。
+- **登录防爆破**：连续失败 >5 次 → 延迟 1s（每来源计数，5 分钟窗口自清）。
 - **兼容 basic-auth**：`Authorization: Basic <user:pass>` 命中直接放行（浏览器记住的旧凭据也能进）。
-- **响应注入**：`selfHandleResponse:true` 手动回写；HTML 缓冲 → `</head>` 前插 `<script>` polyfill → **重算 `content-length`**（否则截断）；其他类型原样 pipe。
+- **响应注入**：`selfHandleResponse:true` 手动回写；HTML 缓冲 → `</head>` 前插 `<script>` polyfill → **重算 `content-length`**（否则截断）；其他类型原样 pipe；上游流异常兜底销毁连接防挂起。
 - **WS 转发**：`upgrade` 事件 → 校验 cookie（无 → 403 应用层拒绝，不带 WWW-Authenticate，不弹框）→ `proxy.ws` 转发；同样剥离 Origin。
 - **polyfill 内容**：AbortSignal.any/timeout、Promise.withResolvers、URL.canParse、Object.hasOwn、Array.at/findLast/findLastIndex。
 - **密码不硬编码**：`DSH_PROXY_USER` / `DSH_PROXY_PASSWORD` 环境变量读取，未设置则拒绝启动。
 
 ## 10. 安全提醒
 
-- 密码**不要硬编码**在代码或脚本里（`server.js` 从环境变量读取；`start_remote_all.ps1` 里默认凭据仅供本地首次使用，请 setx 换成强密码）。
+- 密码**不要硬编码**：`server.js` 从环境变量读取；`start_remote_all.ps1` 不写死凭据（可填 config.json 的 proxyUser/proxyPassword，或 setx 环境变量）；未配置则 proxy 拒绝启动。
 - proxy 仅监听 127.0.0.1；公网唯一入口是 ngrok（TLS）。
 - **不要在 ngrok 侧加 basic-auth**（traffic policy）——对 WebSocket 无效且会弹窗，认证统一由 proxy 的 cookie 会话负责。
 - fence 的 **Host 白名单校验保留**（`--trusted-host` 只放行指定域名），剥离 Origin 不降低安全。
@@ -153,13 +156,14 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 
 ## 11. 提交说明
 
-- `.gitignore` 已忽略：`ngrok/`（整个目录）、`ngrok_token.txt`（真 token）、`proxy/node_modules/`。
-- 提交的模板：`ngrok_token.txt.temp`（clone 后复制为 `ngrok_token.txt` 填自己的 token）。
+- `.gitignore` 已忽略：`config.json`（含真 token/路径）、`ngrok/`（整个目录）、`proxy/node_modules/`。
+- 提交的模板：`config.json.temp`（clone 后复制为 `config.json` 填自己的配置）。
 - proxy 依赖由 `package.json` 声明，clone 后 `cd proxy && npm install http-proxy`。
 
 ## 12. 变更记录
 
-- **v4（2026-08-24）**：合并手册与 README 为单文档；补 Node.js 安装说明；`start_dsh_web_remote.*` 删除（并入一键脚本）；ngrok authtoken 走 `ngrok_token.txt` + 交互询问流程；`ngrok/` 整目录 git 忽略。
+- **v5（2026-08-24）**：代码审查加固——dshtmHome 生效（DSH_HOME 环境变量）、ngrokHost/proxy 凭据纳入 config.json（去硬编码）、_Save-CfgToken 保留其他字段、前窗宿主语义（关窗=关 dsh）、proxy 加登录防爆破/会话清理/流错误兜底。
+- **v4**：合并手册与 README 为单文档；补 Node.js 安装说明；`start_dsh_web_remote.*` 删除（并入一键脚本）；ngrok authtoken 走 config.json + 交互询问流程；`ngrok/` 整目录 git 忽略。
 - v3：解决 content-length 截断 bug + 剥离 Origin 头绕开 fence 严格同源判定 + 扩展 polyfill → 手机/远程全功能验证通过。密码改环境变量配置。
 - v2：ngrok basic-auth → proxy cookie 会话；polyfill 注入；修复 http-proxy selfHandleResponse 双写头崩溃。
 - v1：初始方案探索（traffic policy basic-auth 语法 5 连踩坑；`--basic-auth` flag 已废弃）。

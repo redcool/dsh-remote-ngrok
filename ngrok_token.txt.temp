@@ -1,7 +1,0 @@
-# ngrok authtoken 模板
-# 1. 复制本文件为 ngrok_token.txt（去掉 .temp）
-# 2. 填入你的 ngrok authtoken（https://dashboard.ngrok.com → Your Authtoken）
-# 3. 运行 start_remote_all.bat，脚本会自动读取并配置
-# 格式示例（2 开头，含下划线，约 40+ 字符）：
-# 2ABCDefghIJKlmnoPQRStuVWXyz0123_4abcDEFGhijklMNOp
-YOUR_NGROK_AUTHTOKEN_HERE

@@ -31,6 +31,11 @@ const proxy = httpProxy.createProxyServer({ target: TARGET, ws: true, selfHandle
 function grantSession(res) {
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, Date.now() + SESSION_TTL_MS);
+  // 惰性清理：每次发新会话时清一次过期项（防 Map 无限增长）
+  if (sessions.size > 256) {
+    const now = Date.now();
+    for (const [k, exp] of sessions) if (now > exp) sessions.delete(k);
+  }
   res.setHeader('Set-Cookie', `dsh_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
 }
 function sessionOk(req) {
@@ -41,6 +46,16 @@ function sessionOk(req) {
   if (Date.now() > exp) { sessions.delete(m[1]); return false; }
   return true;
 }
+
+// ---------- 登录防爆破：同一来源连续失败 >5 次 → 延迟 1s（内存计数，重启即清零） ----------
+const failCount = new Map(); // 来源 -> 连续失败次数
+function tooManyFails(ip) {
+  const n = failCount.get(ip) || 0;
+  if (n >= 5) return true;
+  setTimeout(() => failCount.delete(ip), 5 * 60 * 1000); // 5 分钟窗口后清计数
+  return false;
+}
+function recordFail(ip) { failCount.set(ip, (failCount.get(ip) || 0) + 1); }
 
 // ---------- basic-auth 兼容（浏览器记住的旧凭据也能进） ----------
 function basicOk(req) {
@@ -136,14 +151,21 @@ const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
+      const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
       const sp = new URLSearchParams(body);
-      if (sp.get('u') === USERNAME && sp.get('p') === PASSWORD) {
+      const ok = sp.get('u') === USERNAME && sp.get('p') === PASSWORD;
+      if (ok) {
+        failCount.delete(ip);           // 成功 → 清失败计数
         grantSession(res);
         res.writeHead(302, { Location: '/' });
         res.end();
       } else {
-        res.writeHead(302, { Location: '/?fail=1' });
-        res.end();
+        recordFail(ip);
+        const wait = tooManyFails(ip);  // 连续 5 次失败后延迟回应（防爆破）
+        setTimeout(() => {
+          res.writeHead(302, { Location: '/?fail=1' });
+          res.end();
+        }, wait ? 1000 : 0);
       }
     });
     return;
@@ -186,9 +208,13 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
       res.writeHead(proxyRes.statusCode, headers);
       res.end(out);
     });
+    proxyRes.on('error', (e) => {               // 上游读流异常：兜底关连接，防挂起
+      res.destroy();
+    });
   } else {
     res.writeHead(proxyRes.statusCode, proxyRes.headers);
     proxyRes.pipe(res);
+    proxyRes.on('error', (e) => res.destroy());
   }
 });
 
