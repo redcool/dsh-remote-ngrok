@@ -40,6 +40,7 @@ mcp server → bridge_godot / bridge_unity
 | git | 拉取本模块 | https://git-scm.com/download/win | macOS 自带 / `brew install git` |
 | ngrok | 公网隧道 **（v3.39+，一键脚本会自动下载对应系统二进制，无需手动装）** | — | — |
 | npm 依赖 | proxy 的 http-proxy | 见 §5 步骤 ① | 同左 |
+| **dsh CLI** | DSH 本体（npm 包 `@deepseek-ai/dsh`）。官方 README 只列 npx 与源码构建，本手册推荐 **npm 安装（固定目录、版本可钉）**，见 §5 步骤 ② | 见 §5 步骤 ② | 同左 |
 
 > Node.js 安装后**需重开终端**（PATH 才生效）。proxy 兼容任意现代 Node（v14+ 即可，建议 LTS）。
 
@@ -66,7 +67,7 @@ mcp server → bridge_godot / bridge_unity
 - **留空**：脚本用 ngrok 自动分配的**临时随机域名**（每次启动会变，但保证立刻能用），启动日志会打印真实 URL。
 
 **② 配置 authtoken / 基本信息**（一键脚本启动时自动处理）：
-- 复制 `config.json.temp` → 改名 `config.json` → 填：`ngrok_token`（https://dashboard.ngrok.com → Your Authtoken）、`dsh_install_dir`（DSH 安装位置）、`dsh_home`（DSH 数据目录）、推荐填 `ngrok_host`（你的静态域名，见 ①）、`proxy_user` / `proxy_password`（proxy 登录凭据，也可用环境变量）
+- 复制 `config.json.temp` → 改名 `config.json` → 填：`ngrok_token`（https://dashboard.ngrok.com → Your Authtoken）、`dsh_install_dir`（DSH 安装目录，见 §5 ②）、`dsh_home`（DSH 数据目录）、推荐填 `ngrok_host`（你的静态域名，见 ①）、`proxy_user` / `proxy_password`（proxy 登录凭据，也可用环境变量）
 - token 缺失/无效时运行脚本会**交互询问**，粘贴即写回 `config.json`
 - token 通过 `NGROK_AUTHTOKEN` 环境变量传给 ngrok（优先于全局配置，**不改动你机器上的 ngrok.yml**）
 
@@ -78,13 +79,23 @@ mcp server → bridge_godot / bridge_unity
 cd proxy
 npm install http-proxy
 
-# ② 配置 proxy 登录密码（必做，否则 proxy 拒绝启动；环境变量持久化）
+# ② 安装 DSH（推荐：npm 专用目录安装，该目录即 config.json 的 dsh_install_dir）
+#    本机 harness 实例（如 H:/AI/dsh）就是这种装法——一个依赖 @deepseek-ai/dsh 的目录
+mkdir D:\dsh
+cd /d D:\dsh
+npm init -y
+npm install @deepseek-ai/dsh
+#    升级：cd /d D:\dsh && npm update @deepseek-ai/dsh
+#    可选全局安装：npm install -g @deepseek-ai/dsh（macOS/Linux 脚本有 PATH 兜底；Windows 仍建议专用目录）
+#    为何不用 npx / git clone：见下文「DSH 安装方式对比」
+
+# ③ 配置 proxy 登录密码（必做，否则 proxy 拒绝启动；环境变量持久化）
 setx DSH_PROXY_USER "dsh"
 setx DSH_PROXY_PASSWORD "换成你的强密码"
 
-# ③ 复制 config.json.temp → config.json，填 ngrok_token / dsh_install_dir / dsh_home（§4②）
+# ④ 复制 config.json.temp → config.json，填 ngrok_token / dsh_install_dir（= ② 的目录，如 D:/dsh）/ dsh_home（§4②）
 #    推荐填 ngrok_host（你的静态域名，§4①）
-# ④ 一键拉起
+# ⑤ 一键拉起
 # 双击 start_remote_all.bat（窗口即 dsh web 宿主；关闭窗口 = 关闭 dsh）
 ```
 
@@ -93,15 +104,33 @@ setx DSH_PROXY_PASSWORD "换成你的强密码"
 # ① 安装 proxy 依赖（只需一次；前提：Node.js 已装）
 cd proxy && npm install http-proxy
 
-# ② 配置 proxy 登录密码（写入 shell 配置 ~/.zshrc 或 ~/.bashrc）
+# ② 安装 DSH（推荐：npm 专用目录安装，该目录即 config.json 的 dsh_install_dir）
+mkdir -p ~/dsh && cd ~/dsh
+npm init -y
+npm install @deepseek-ai/dsh
+#    升级：cd ~/dsh && npm update @deepseek-ai/dsh
+#    为何不用 npx / git clone：见下文「DSH 安装方式对比」
+
+# ③ 配置 proxy 登录密码（写入 shell 配置 ~/.zshrc 或 ~/.bashrc）
 export DSH_PROXY_USER="dsh"
 export DSH_PROXY_PASSWORD="换成你的强密码"
 
-# ③ 复制 config.json.temp → config.json，填 ngrok_token / dsh_install_dir / dsh_home（§4②）
+# ④ 复制 config.json.temp → config.json，填 ngrok_token / dsh_install_dir（= ② 的目录，如 ~/dsh）/ dsh_home（§4②）
 #    推荐填 ngrok_host（你的静态域名，§4①）；ngrok 二进制脚本会自动下载
-# ④ 一键拉起
+# ⑤ 一键拉起
 bash start_remote_all.sh    # 终端即 dsh web 宿主；Ctrl+C / 关窗口 = 关 dsh
 ```
+
+**DSH 安装方式对比（为什么用 npm install，而不是官方 README 的 npx / 源码构建）**
+
+| 方式 | 官方 README | 对本工具集的适配 |
+|---|---|---|
+| `npx @deepseek-ai/dsh web` | 官方「Run from npm」 | ❌ npx 是**即取即跑**：包缓存在 npm `_npx` 缓存目录，路径随版本漂移 → 启动脚本无法得到稳定的 `dsh_install_dir`；默认拉 `latest`，而 DSH 处于 developer preview（官方明示会有 breaking changes）→ 版本不可控 |
+| `git clone` + `pnpm install` + `pnpm build` | 官方「Run from source」 | ❌ 源码开发路径：需 pnpm + 整仓构建，对「只想远程访问 DSH」的终端用户过重、脆弱 |
+| `npm install @deepseek-ai/dsh`（**本手册推荐**） | npm 包已发布（`@deepseek-ai/dsh`，bin: `dsh`），官方未单列 | ✅ 固定安装目录 → 填进 `dsh_install_dir`；版本可钉（`@0.1.x`）可平滑升级（`npm update`）；无需构建；一键脚本本就是按此布局定位 dsh（`<目录>/node_modules/@deepseek-ai/dsh/lib/bin.js`） |
+
+> DSH 本体 harness 最常见的落地方式（含本机实例 `H:/AI/dsh`）就是一个纯 npm 依赖目录——`npm install` 就是稳定工作方式，官方 README 只是没把它列为独立安装项。
+> 安装后可用 `node <目录>/node_modules/@deepseek-ai/dsh/lib/bin.js web` 快速自检；一键脚本内部调用的正是这个入口，参数与官方 `dsh web` 完全一致（`--port 3080 --trusted-host <域名> --no-open`）。
 
 **登录**：浏览器打开脚本打印的 ngrok URL → 登录页输入 `DSH_PROXY_USER / DSH_PROXY_PASSWORD`。
 
@@ -175,6 +204,7 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 
 ## 12. 变更记录
 
+- **v9（2026-08-24）**：新增 **DSH 的 npm 安装说明**——§2 依赖表加 dsh CLI 行；§5 步骤 ② 给出 npm 专用目录安装（mkdir + npm init + npm install @deepseek-ai/dsh，升级 npm update）与可选全局安装；新增「DSH 安装方式对比」表解释为何不用官方 README 的 npx / git clone（npx 缓存路径漂移、版本不可控；源码构建过重）；config.json.temp 的 dsh_install_dir 注释同步指向 §5 ②。
 - **v8（2026-08-24）**：新增 **`start_remote_all.sh`（macOS/Linux 一键脚本）**——自动检测系统架构并下载对应 ngrok 二进制（darwin/linux × amd64/arm64）；ngrok 域名策略改为 **ngrok_host 静态域名优先（注册 ngrok 免费送 .ngrok-free.dev）+ 留空自动随机域名兜底**，trusted-host 以 ngrok API 拿到的真实公网域名为准；config.json.temp/README 全量同步。
 - **v7（2026-08-24）**：提交前复查——polyfill 无条件注入（修 `AbortSignal` guard 隐患）、basic-auth 改用 timingSafeEqual、防爆破来源取 X-Forwarded-For（ngrok 下才有效）、删 ps1 死代码；proxy 逻辑单测通过（401/限速/502）。
 - **v6**：config.json 字段改名对齐环境变量语义——`dshtmWebDir→dsh_install_dir`、`dshtmHome→dsh_home`、`ngrokHost→ngrok_host`、`proxyUser→proxy_user`、`proxyPassword→proxy_password`（见名知意，新用户友好）；config.json 补齐全部字段（proxy 凭据从 setx 环境变量同步）。
