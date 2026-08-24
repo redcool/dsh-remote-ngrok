@@ -3,7 +3,7 @@
 # 用法：双击 start_remote_all.bat（或在本目录跑本 ps1）
 # 链路：手机/浏览器 → ngrok(TLS) → dsh-proxy(127.0.0.1:3200) → dsh web(127.0.0.1:3080)
 # 幂等：proxy/ngrok 已在跑的不重启；dsh web 前台窗口打开（关窗口 = 关 dsh，可自控）
-# 配置：读 config.json（模板 config.json.temp 复制改名后填写：ngrok_token/dshtmWebDir/dshtmHome）
+# 配置：读 config.json（模板 config.json.temp 复制改名后填写：ngrok_token / dsh_install_dir / dsh_home / ngrok_host / proxy_user / proxy_password）
 # ============================================================
 
 $ErrorActionPreference = 'Continue'
@@ -11,37 +11,37 @@ $toolsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $cfgFile  = Join-Path $toolsDir "config.json"
 
 # ========== 读取配置（config.json）==========
-$script:ngrokToken  = ""
-$script:dshtmWebDir = ""
-$script:dshtmHome   = ""
-$script:ngrokHost   = ""
-$script:proxyUser   = ""
-$script:proxyPass   = ""
+$script:ngrokToken   = ""
+$script:dshInstallDir = ""
+$script:dshHome      = ""
+$script:ngrokHost    = ""
+$script:proxyUser    = ""
+$script:proxyPass    = ""
 if (Test-Path $cfgFile) {
   try {
     $cfg = Get-Content $cfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    $script:ngrokToken  = [string]$cfg.ngrok_token
-    $script:dshtmWebDir = [string]$cfg.dshtmWebDir
-    $script:dshtmHome   = [string]$cfg.dshtmHome
-    $script:ngrokHost   = [string]$cfg.ngrokHost
-    $script:proxyUser   = [string]$cfg.proxyUser
-    $script:proxyPass   = [string]$cfg.proxyPassword
+    $script:ngrokToken   = [string]$cfg.ngrok_token
+    $script:dshInstallDir = [string]$cfg.dsh_install_dir
+    $script:dshHome      = [string]$cfg.dsh_home
+    $script:ngrokHost    = [string]$cfg.ngrok_host
+    $script:proxyUser    = [string]$cfg.proxy_user
+    $script:proxyPass    = [string]$cfg.proxy_password
   } catch { Write-Host "[!] config.json 解析失败：$($_.Exception.Message)" -ForegroundColor Red }
 }
-if (-not $script:dshtmWebDir) { Write-Host "[!] config.json 缺少 dshtmWebDir（dsh 安装位置）——请复制 config.json.temp 为 config.json 并填写" -ForegroundColor Red }
+if (-not $script:dshInstallDir) { Write-Host "[!] config.json 缺少 dsh_install_dir（DSH 安装位置）——请复制 config.json.temp 为 config.json 并填写" -ForegroundColor Red }
 # ========== 配置区结束 ==========
 
-# ngrok 静态域名（优先 config.json 的 ngrokHost；为空则用默认）
+# ngrok 静态域名（优先 config.json 的 ngrok_host；为空则用默认）
 $ngrokHost = if ($script:ngrokHost) { $script:ngrokHost } else { "happier-custodian-hastily.ngrok-free.dev" }
 $script:defaultHost = "happier-custodian-hastily.ngrok-free.dev"
 $ngrokExe  = Join-Path $toolsDir "ngrok\ngrok.exe"
 $proxyDir  = Join-Path $toolsDir "proxy"
 
-# proxy 凭据：优先用户级环境变量；没有则用 config.json（proxyUser/proxyPassword）；都没有则提示
+# proxy 凭据：优先用户级环境变量；没有则用 config.json（proxy_user/proxy_password）；都没有则提示
 $env:DSH_PROXY_USER = if ($env:DSH_PROXY_USER) { $env:DSH_PROXY_USER } elseif ($script:proxyUser) { $script:proxyUser } else { "" }
 $env:DSH_PROXY_PASSWORD = if ($env:DSH_PROXY_PASSWORD) { $env:DSH_PROXY_PASSWORD } elseif ($script:proxyPass) { $script:proxyPass } else { "" }
 if (-not $env:DSH_PROXY_USER -or -not $env:DSH_PROXY_PASSWORD) {
-  Write-Host "[!] proxy 登录凭据未配置：请 setx DSH_PROXY_USER / DSH_PROXY_PASSWORD（或填入 config.json 的 proxyUser/proxyPassword）——proxy 将无法启动" -ForegroundColor Yellow
+  Write-Host "[!] proxy 登录凭据未配置：请 setx DSH_PROXY_USER / DSH_PROXY_PASSWORD（或填入 config.json 的 proxy_user/proxy_password）——proxy 将无法启动" -ForegroundColor Yellow
 }
 
 function Test-PortListen([int]$port) {
@@ -134,8 +134,8 @@ if ($conn) {
   }
 }
 if (-not $webOk) {
-  if (-not $script:dshtmWebDir) {
-    Write-Host "[!] 无法启动 dsh web：config.json 未配置 dshtmWebDir" -ForegroundColor Red
+  if (-not $script:dshInstallDir) {
+    Write-Host "[!] 无法启动 dsh web：config.json 未配置 dsh_install_dir" -ForegroundColor Red
   } else {
     Write-Host ""
     Write-Host "==================================================" -ForegroundColor Cyan
@@ -144,14 +144,14 @@ if (-not $webOk) {
     Write-Host " 本机: http://127.0.0.1:3080"
     Write-Host "==================================================" -ForegroundColor Cyan
     Write-Host ""
-    $shim = Join-Path $script:dshtmWebDir "node_modules\.bin\dsh.cmd"
-    # dsh 数据目录（config.json dshtmHome）——必须在启动前设置，否则 dsh 用默认 HOME 找错数据
-    if ($script:dshtmHome) { $env:DSH_HOME = $script:dshtmHome }
+    $shim = Join-Path $script:dshInstallDir "node_modules\.bin\dsh.cmd"
+    # dsh 数据目录（config.json dsh_home，对应环境变量 DSH_HOME）——必须在启动前设置，否则 dsh 用默认 HOME 找错数据
+    if ($script:dshHome) { $env:DSH_HOME = $script:dshHome }
     if (Test-Path $shim) {
       # 前台调用 dsh.cmd（cmd 包装 → node）：阻塞在本窗口，关窗 = 终止进程树 = 关 dsh
       & $shim web --port 3080 --trusted-host $ngrokHost --no-open
     } else {
-      node (Join-Path $script:dshtmWebDir "node_modules\@deepseek-ai\dsh\lib\bin.js") web --port 3080 --trusted-host $ngrokHost --no-open
+      node (Join-Path $script:dshInstallDir "node_modules\@deepseek-ai\dsh\lib\bin.js") web --port 3080 --trusted-host $ngrokHost --no-open
     }
     # dsh 退出后（窗口被关/手动 Ctrl+C）回到这里
     Write-Host "[*] dsh web 已停止" -ForegroundColor DarkGray

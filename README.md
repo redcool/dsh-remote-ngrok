@@ -52,7 +52,7 @@ mcp server → bridge_godot / bridge_unity
 | `proxy/server.js` | 反向代理：cookie 会话认证 + polyfill 注入 + Origin 剥离（需环境变量，见 §5 ②） |
 | `proxy/package.json` | proxy 依赖声明（`npm install http-proxy`） |
 | `config.json.temp` | **配置模板**（git 提交）：复制为 `config.json` 后填 ngrok token / dsh 路径 / proxy 凭据（见 §4 ②） |
-| `config.json` | **本机配置（git 忽略）**：ngrok_token、dshtmWebDir、dshtmHome、ngrokHost、proxyUser/proxyPassword |
+| `config.json` | **本机配置（git 忽略）**：`ngrok_token`、`dsh_install_dir`、`dsh_home`、`ngrok_host`、`proxy_user`、`proxy_password` |
 | `ngrok/` | **运行目录（git 忽略）**：ngrok.exe 首次使用自行下载放入；运行时生成日志 |
 
 ## 4. ngrok 下载与配置
@@ -67,13 +67,11 @@ https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip
 - 官方下载页（备选）：https://ngrok.com/download
 
 **② 配置 authtoken**（`start_remote_all.bat` 启动时自动处理）：
-- 复制 `config.json.temp` → 改名 `config.json` → 填：`ngrok_token`（https://dashboard.ngrok.com → Your Authtoken）、`dshtmWebDir`（dsh 安装位置）、`dshtmHome`（dsh 数据目录）、可选 `ngrokHost`（静态域名）、`proxyUser/proxyPassword`（proxy 登录凭据）
-- 或直接运行 `start_remote_all.bat`：检测到 token 缺失/无效时**交互询问**，粘贴即写回 `config.json`
-- token 通过 `NGROK_AUTHTOKEN` 环境变量传给 ngrok（优先于全局配置，**不改动你机器上的 ngrok.yml**）
-- 或直接运行 `start_remote_all.bat`：检测到缺失/无效 token 时**交互询问**，粘贴即保存
+- 复制 `config.json.temp` → 改名 `config.json` → 填：`ngrok_token`（https://dashboard.ngrok.com → Your Authtoken）、`dsh_install_dir`（DSH 安装位置）、`dsh_home`（DSH 数据目录）、可选 `ngrok_host`（静态域名）、`proxy_user` / `proxy_password`（proxy 登录凭据，也可用 setx 环境变量）
+- 或直接运行 `start_remote_all.bat`：检测到缺失/无效 token 时**交互询问**，粘贴即写回 `config.json`
 - token 通过 `NGROK_AUTHTOKEN` 环境变量传给 ngrok（优先于全局配置，**不改动你机器上的 ngrok.yml**）
 
-**③ 静态域名（可选，推荐）**：免费随机域名重启会变。正式使用申请静态域名：dashboard.ngrok.com → Domains → New Domain（如 `dsh-xxx.ngrok.app`）→ 脚本顶部 `$ngrokHost` 改为该域名（trusted-host 自动同步），此后 URL 永久不变。
+**③ 静态域名（可选，推荐）**：免费随机域名重启会变。正式使用申请静态域名：dashboard.ngrok.com → Domains → New Domain（如 `dsh-xxx.ngrok.app`）→ config.json 的 `ngrok_host` 填该域名（trusted-host 自动同步），此后 URL 永久不变。
 
 ## 5. 首次使用（部署）
 
@@ -87,8 +85,8 @@ setx DSH_PROXY_USER "dsh"
 setx DSH_PROXY_PASSWORD "换成你的强密码"
 
 # ③ 下载 ngrok.exe（§4①）
-# ④ 复制 config.json.temp → config.json，填 ngrok_token / dshtmWebDir / dshtmHome（§4②）
-#    静态域名可选填 ngrokHost 字段（§4③）
+# ④ 复制 config.json.temp → config.json，填 ngrok_token / dsh_install_dir / dsh_home（§4②）
+#    静态域名可选填 ngrok_host 字段（§4③）
 # ⑤ 一键拉起
 # 双击 start_remote_all.bat（窗口即 dsh web 宿主；关闭窗口 = 关闭 dsh）
 ```
@@ -105,7 +103,7 @@ setx DSH_PROXY_PASSWORD "换成你的强密码"
 | 开机/断链后拉起 | 双击 `start_remote_all.bat`（幂等：已在跑的不重启，页面不断线） |
 | 停止 dsh web | 直接关闭 bat 窗口（窗口即 dsh web 宿主，关窗 = 进程树终止 = 关 dsh） |
 | 查当前隧道 URL | `(Invoke-RestMethod http://127.0.0.1:4040/api/tunnels).tunnels[0].public_url` |
-| 换静态域名 | 改 config.json 的 `ngrokHost` → 重跑一键脚本 |
+| 换静态域名 | 改 config.json 的 `ngrok_host` → 重跑一键脚本 |
 
 ## 7. 验证命令（本机快速自检）
 
@@ -162,7 +160,8 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 
 ## 12. 变更记录
 
-- **v5（2026-08-24）**：代码审查加固——dshtmHome 生效（DSH_HOME 环境变量）、ngrokHost/proxy 凭据纳入 config.json（去硬编码）、_Save-CfgToken 保留其他字段、前窗宿主语义（关窗=关 dsh）、proxy 加登录防爆破/会话清理/流错误兜底。
+- **v6（2026-08-24）**：config.json 字段改名对齐环境变量语义——`dshtmWebDir→dsh_install_dir`、`dshtmHome→dsh_home`、`ngrokHost→ngrok_host`、`proxyUser→proxy_user`、`proxyPassword→proxy_password`（见名知意，新用户友好）；config.json 补齐全部字段（proxy 凭据从 setx 环境变量同步）。
+- **v5**：代码审查加固——dshtmHome 生效（DSH_HOME 环境变量）、ngrokHost/proxy 凭据纳入 config.json（去硬编码）、_Save-CfgToken 保留其他字段、前窗宿主语义（关窗=关 dsh）、proxy 加登录防爆破/会话清理/流错误兜底。
 - **v4**：合并手册与 README 为单文档；补 Node.js 安装说明；`start_dsh_web_remote.*` 删除（并入一键脚本）；ngrok authtoken 走 config.json + 交互询问流程；`ngrok/` 整目录 git 忽略。
 - v3：解决 content-length 截断 bug + 剥离 Origin 头绕开 fence 严格同源判定 + 扩展 polyfill → 手机/远程全功能验证通过。密码改环境变量配置。
 - v2：ngrok basic-auth → proxy cookie 会话；polyfill 注入；修复 http-proxy selfHandleResponse 双写头崩溃。
