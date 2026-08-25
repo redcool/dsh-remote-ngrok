@@ -2,7 +2,7 @@
 # DSH 远程访问 · 一键拉起（proxy + ngrok + dsh web 全链路）
 # 用法：双击 start_remote_all.bat（或在本目录跑本 ps1）
 # 链路：手机/浏览器 → ngrok(TLS) → dsh-proxy(127.0.0.1:3200) → dsh web(127.0.0.1:3080)
-# 幂等：proxy/ngrok 已在跑的不重启；dsh web 前台窗口打开（关窗口 = 关 dsh，可自控）
+# 幂等：proxy/ngrok 已在跑的不重启；**dsh web 强制重启**（2026-08-27 用户：双击 = kill 当前 dsh 进程再拉起，保证配置/版本更新生效）
 # 配置：读 config.json（模板 config.json.temp 复制改名后填写：ngrok_token / dsh_install_dir / dsh_home / ngrok_host / proxy_user / proxy_password）
 # ============================================================
 
@@ -138,20 +138,15 @@ if ($script:tunnelUrl) {
 }
 
 # ③ dsh web（3080：带 --trusted-host 前台运行——bat 窗口即宿主，关窗 = 关 dsh）
+# 2026-08-27 用户：双击启动 = 强制重启链路 → 无条件停掉当前在跑的 dsh web（3080 占用者），再拉新实例。
 # trusted-host 以 ngrok 真实公网域名为准（随机域名下 config 的 ngrok_host 可能为空）
 $tunnelHost = if ($script:tunnelUrl) { ([uri]$script:tunnelUrl).Host } else { $ngrokHost }
 $webOk = $false
 $conn = Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($conn) {
-  $cmdline = (Get-CimInstance Win32_Process -Filter "ProcessId = $($conn.OwningProcess)" -ErrorAction SilentlyContinue).CommandLine
-  if ($tunnelHost -and $cmdline -and $cmdline.Contains($tunnelHost)) {
-    Write-Host "[*] dsh web 已在跑且 trusted-host 匹配 — 跳过"
-    $webOk = $true
-  } else {
-    Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    Write-Host "[*] 停旧 dsh web（trusted-host 不匹配，重启）"
-  }
+  Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+  Write-Host "[*] 已停旧 dsh web（强制重启：3080 旧进程 PID $($conn.OwningProcess)）"
 }
 if (-not $webOk) {
   if (-not $script:dshInstallDir) {
