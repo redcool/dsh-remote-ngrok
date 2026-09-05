@@ -204,6 +204,8 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 
 ## 12. 变更记录
 
+- **v11（2026-09-05）**：删除 **`start_ngrok.bat` / `start_ngrok.ps1`**（v10 曾加入的「只开隧道」脚本）——整链（proxy+ngrok+dsh web）由 `start_remote_all.bat` 一键覆盖，单开隧道工具无独立价值，移除以免混淆；README §3/§6 相关行同步删除。
+- **v10（2026-09-05）**：新增 **`start_ngrok.bat` / `start_ngrok.ps1`（只开 ngrok 隧道）**——双击即可：读 config.json 的 `ngrok_token`/`ngrok_host`（token 无效则交互询问写回）、只用本地 `ngrok\ngrok.exe`（避开 PATH 上 winget v3.3.1 旧版）、默认转发 3200（dsh-proxy，`-Port` 可改）、已在跑则直接打印现有 URL、前台同窗运行（关窗=停）。
 - **v9（2026-08-24）**：新增 **DSH 的 npm 安装说明**——§2 依赖表加 dsh CLI 行；§5 步骤 ② 给出 npm 专用目录安装（mkdir + npm init + npm install @deepseek-ai/dsh，升级 npm update）与可选全局安装；新增「DSH 安装方式对比」表解释为何不用官方 README 的 npx / git clone（npx 缓存路径漂移、版本不可控；源码构建过重）；config.json.temp 的 dsh_install_dir 注释同步指向 §5 ②。
 - **v8（2026-08-24）**：新增 **`start_remote_all.sh`（macOS/Linux 一键脚本）**——自动检测系统架构并下载对应 ngrok 二进制（darwin/linux × amd64/arm64）；ngrok 域名策略改为 **ngrok_host 静态域名优先（注册 ngrok 免费送 .ngrok-free.dev）+ 留空自动随机域名兜底**，trusted-host 以 ngrok API 拿到的真实公网域名为准；config.json.temp/README 全量同步。
 - **v7（2026-08-24）**：提交前复查——polyfill 无条件注入（修 `AbortSignal` guard 隐患）、basic-auth 改用 timingSafeEqual、防爆破来源取 X-Forwarded-For（ngrok 下才有效）、删 ps1 死代码；proxy 逻辑单测通过（401/限速/502）。
