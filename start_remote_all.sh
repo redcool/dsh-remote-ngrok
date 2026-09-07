@@ -7,6 +7,8 @@
 #   - 自动检测系统与架构，ngrok/ngrok 二进制缺失时自动下载对应版本到 ngrok/
 #   - 读 config.json（模板 config.json.temp 复制改名后填写）
 #   - dsh web 前台运行：本终端窗口即宿主，Ctrl+C / 关窗口 = 关 dsh
+#   - 自动捕获 dsh web 启动打印的 "?token=xxx" → proxy/dsh_token.txt（proxy 自愈换票用，见 README §13）
+#   - proxy 强制重启（应用最新代理代码；proxy/dsh_token.txt 每请求读取，token 变化无需重启）
 # ============================================================
 
 set -u  # 未定义变量报错（不 set -e：让它跑完所有步骤好排查）
@@ -75,16 +77,26 @@ if ! test_token "$TOKEN"; then
 fi
 [ -n "$TOKEN" ] && export NGROK_AUTHTOKEN="$TOKEN"
 
-# ---------- ① dsh-proxy（3200） ----------
+# ---------- ① dsh-proxy（3200；强制重启以应用最新代码） ----------
 port_listen() { nc -z 127.0.0.1 "$1" 2>/dev/null; }
+force_kill_port() {
+  local p="$1" pids
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -ti tcp:"$p" 2>/dev/null)"
+    [ -n "$pids" ] && printf '%s\n' "$pids" | xargs kill -9 2>/dev/null
+  elif command -v fuser >/dev/null 2>&1; then
+    fuser -k "$p/tcp" 2>/dev/null
+  fi
+  sleep 1
+}
 if port_listen 3200; then
-  echo "[*] proxy 已在跑（3200）— 跳过"
-else
-  echo "[*] 启动 dsh-proxy（3200）..."
-  ( cd "$TOOLS_DIR/proxy" && node server.js >"$LOG_DIR/proxy.log" 2>&1 & )
-  sleep 2
-  port_listen 3200 && echo "[+] proxy 3200 在线" || echo "[!] proxy 启动失败（看 $LOG_DIR/proxy.log）"
+  echo "[*] 停旧 proxy（强制重启 3200，应用最新代码）..."
+  force_kill_port 3200
 fi
+echo "[*] 启动 dsh-proxy（3200）..."
+( cd "$TOOLS_DIR/proxy" && node server.js >"$LOG_DIR/proxy.log" 2>&1 & )
+sleep 2
+port_listen 3200 && echo "[+] proxy 3200 在线" || echo "[!] proxy 启动失败（看 $LOG_DIR/proxy.log）"
 
 # ---------- ② ngrok（→3200） ----------
 mkdir -p "$LOG_DIR"
@@ -125,6 +137,17 @@ else
   echo "[!] ngrok 二进制不可执行（$NROK_BIN）"
 fi
 
+# 捕获 dsh web 启动打印的 "dsh web: .../?token=xxx" 行 → proxy/dsh_token.txt
+# （proxy 收到 dsh 的 401 "dsh web authentication required" 时用它 302 到 /?token=... 让 dsh 原生换票）
+dsh_line() {
+  local line="$1" t
+  echo "$line"
+  t="$(printf '%s' "$line" | sed -nE 's#.*//[^/]+/\?token=([A-Za-z0-9_\-]+).*#\1#p')"
+  if [ -n "$t" ]; then
+    printf '%s' "$t" > "$TOOLS_DIR/proxy/dsh_token.txt" 2>/dev/null && echo "[+] 已记录 dsh 启动 token（proxy 自动换票用；也可手动写入 proxy/dsh_token.txt）"
+  fi
+}
+
 # ---------- ③ dsh web（3080，前台运行 = 本终端即宿主） ----------
 TUNNEL_HOST=""
 [ -n "$TUNNEL_URL" ] && TUNNEL_HOST="$(echo "$TUNNEL_URL" | sed -E 's#^https?://##; s#/.*$##')"
@@ -146,12 +169,12 @@ else
     echo " 本机: http://127.0.0.1:3080"
     echo "=================================================="
     echo ""
-    # 前台阻塞运行；Ctrl+C / 关终端 → dsh 停止
+    # 前台阻塞运行；Ctrl+C / 关终端 → dsh 停止。2>&1 逐行过 dsh_line：既保持控制台输出，又捕获启动 token。
     if [ -f "$BIN_JS" ]; then
-      node "$BIN_JS" web --port 3080 --trusted-host "$TUNNEL_HOST" --no-open
+      node "$BIN_JS" web --port 3080 --trusted-host "$TUNNEL_HOST" --no-open 2>&1 | while IFS= read -r line; do dsh_line "$line"; done
     else
       # 兜底：npm 全局安装的 dsh
-      dsh web --port 3080 --trusted-host "$TUNNEL_HOST" --no-open
+      dsh web --port 3080 --trusted-host "$TUNNEL_HOST" --no-open 2>&1 | while IFS= read -r line; do dsh_line "$line"; done
     fi
     echo "[*] dsh web 已停止"
   fi

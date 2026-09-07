@@ -18,6 +18,8 @@ dsh-proxy  (proxy/server.js，Node 反向代理)
    │  ② HTML 注入 polyfill（AbortSignal.any/timeout 等，兼容 iOS < 17.4）
    │  ③ 剥离 Origin 头（绕开 dsh web 的 browser-trust 严格同源校验）
    │  ④ WebSocket 握手转发（带 cookie → 放行；无 cookie → 403 应用层拒绝）
+   │  ⑤ dsh 浏览器会话换票（见下表 #4：dsh 401 → 302 到 /?token=<启动token> → dsh 原生签发 cookie）
+   │  ⑥ 上游 gzip/br 还原为明文后再注入（防压缩流注入损坏，见下表 #5）
    ▼
 dsh web  (127.0.0.1:3080，`dsh web --trusted-host <ngrok域名>` 启动)
    ▼
@@ -31,6 +33,8 @@ mcp server → bridge_godot / bridge_unity
 | 1 | ngrok basic-auth 对 **WebSocket 无效**（WS 握手协议禁止自定义 Authorization 头，只认 cookie）→ dsh 实时通道每次重连 401 → **手机反复弹 basic 登录框** | proxy 改 **cookie 会话**：登录一次，WS 带 cookie 全通，永不弹窗 |
 | 2 | dsh 前端用 `AbortSignal.any()`（仅 iOS 17.4+）→ 老手机（iOS 16.4）启动/发消息崩溃 | proxy 在 HTML `</head>` 前**注入 polyfill**，不用改 dsh 任何文件 |
 | 3 | dsh web 的 browser-trust fence 要求带 Origin 的请求 **Origin 与 Host 精确同源**；经代理后判定误伤 → 工作区/会话数据接口 403 | proxy **转发时剥离 Origin 头** → fence 走"无 Origin → 放行"分支；**Host 白名单校验仍生效，安全不降级** |
+| 4 | 新版 dsh（≥ 0.1.2-rc.1）浏览器访问根页面要求**启动 token 换 signed cookie**（无 → 401 "dsh web authentication required"，手机上即"需要 dsh web 授权"） | proxy 已过认证的访问遇到 dsh 401 → **302 到 /?token=<dsh 启动 token>**，由 dsh **原生**换票（按 Host 签 domain 绑定 cookie，30 天）；token 由一键脚本启动 dsh 时自动捕获写入 proxy/dsh_token.txt（`DSH_PROXY_DSH_TOKEN` 可覆盖）——不复制 dsh 内部 cookie 格式，天然兼容版本升级 |
+| 5 | dsh 上游在远程访问场景把 HTML 回成 **gzip/br**；polyfill 注入对压缩流做会**破坏响应**（手机表现为连接中断/"socket hang up"） | proxy 转发前剥离 Accept-Encoding + html 分支**防御性解压**（gzip/br/deflate → 明文）→ 注入 → 去掉 content-encoding/vary 后以 chunked 明文回包 |
 
 ## 2. 环境准备
 
@@ -49,10 +53,11 @@ mcp server → bridge_godot / bridge_unity
 | 文件 | 作用 |
 |---|---|
 | `README.md` | 本文件（完整手册：环境/部署/使用/验证/排障） |
-| **`start_remote_all.bat/.ps1`** | **Windows 一键拉起全链路**（proxy+ngrok+dsh web，幂等；**本窗口即 dsh web 宿主，关窗 = 关 dsh**） |
-| **`start_remote_all.sh`** | **macOS/Linux 一键拉起**（同功能；自动检测系统架构并下载对应 ngrok 二进制）——**日常用这个** |
-| `proxy/server.js` | 反向代理：cookie 会话认证 + polyfill 注入 + Origin 剥离 |
+| **`start_remote_all.bat/.ps1`** | **Windows 一键拉起全链路**（proxy+ngrok+dsh web；**proxy 与 dsh web 均强制重启**以应用最新配置/代码；**本窗口即 dsh web 宿主，关窗 = 关 dsh**） |
+| **`start_remote_all.sh`** | **macOS/Linux 一键拉起**（同功能；自动检测系统架构并下载对应 ngrok 二进制；proxy 强制重启，自动捕获换票 token）——**日常用这个** |
+| `proxy/server.js` | 反向代理：cookie 会话认证 + polyfill 注入 + Origin 剥离 + dsh 换票自愈 + gzip 还原 |
 | `proxy/package.json` | proxy 依赖声明（`npm install http-proxy`） |
+| `proxy/dsh_token.txt` | **运行时生成（git 忽略）**：当前 dsh web 启动 token（proxy 自愈换票用；脚本启动 dsh 时自动写入，也可手动粘贴） |
 | `config.json.temp` | **配置模板**（git 提交）：复制为 `config.json` 后填 ngrok token / dsh 路径 / proxy 凭据（见 §4 ②） |
 | `config.json` | **本机配置（git 忽略）**：`ngrok_token`、`dsh_install_dir`、`dsh_home`、`ngrok_host`、`proxy_user`、`proxy_password` |
 | `ngrok/` | **运行目录（git 忽略，自动管理）**：脚本自动下载对应系统二进制；运行时生成日志 |
@@ -157,8 +162,8 @@ curl.exe -s -o NUL -w "HTTP %{http_code}`n" https://<ngrok-url>
 # ② 登录 → 302 + Set-Cookie
 curl.exe -s -c $env:TEMP\c.txt -o NUL -X POST -d "u=<USER>&p=<PASSWORD>" https://<ngrok-url>/__login
 
-# ③ 带 cookie 首页 → 200，且含 polyfill
-curl.exe -s -b $env:TEMP\c.txt https://<ngrok-url> | Select-String 'AbortSignal\.any'
+# ③ 带 cookie 首页 → 自动完成 dsh 换票（302:/?token=... → 303+Set-Cookie → 200），且含 polyfill
+curl.exe -s -L -b $env:TEMP\c.txt -c $env:TEMP\c.txt https://<ngrok-url> | Select-String 'AbortSignal\.any'
 
 # ④ fence 放行验证（带 Origin 应不再 403）
 curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_code}`n" http://127.0.0.1:3200/api/status
@@ -175,6 +180,8 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 | ERR_NGROK_3200 / endpoint offline | ngrok 进程退出或被杀，或安装目录被删除 | 重跑一键脚本（自动拉起；二进制没了会自动重下） |
 | 脚本提示 ngrok 二进制缺失/下载失败 | 网络无法访问 bin.equinox.io；或旧版 winget ngrok 冲突 | 手动下载对应平台 zip 解压到 `ngrok/`（见 §4）；确保 PATH 无 v3.3.1 旧版 |
 | 本机能看、手机/远程看不到 | 浏览器旧缓存/旧凭据 | 无痕窗口测试；清该站点缓存 |
+| 手机打开显示 **"需要 dsh web 授权"（dsh web authentication required）** | dsh ≥ 0.1.2-rc.1 的浏览器会话认证：缺启动 token 换的 signed cookie（proxy 已过认证但 dsh 侧无 cookie）——多因**手动重启过 dsh web**（token 已轮换）或 proxy 还是旧代码 | **重跑 start_remote_all(.bat/.ps1/.sh)**：脚本会重启 dsh 并自动捕获新 token 写入 proxy/dsh_token.txt → 手机**刷新页面即可**（proxy 自动完成换票，之后 30 天无需再弄）。应急：把 dsh 启动终端里打印的 `dsh web: http://127.0.0.1:3080/?token=xxx` 整行发给 proxy 端，将 `xxx` 粘贴到 proxy/dsh_token.txt 即可立即生效（无需重启任何进程） |
+| 手机能登录但首页**一直转圈/连不上（socket hang up）** | 上游把 HTML 回成 gzip/br，旧 proxy 向压缩流注入 polyfill 损坏响应；或手机访问的是 ngrok 的 502/校验页 | 升级 proxy（v12 起剥离 Accept-Encoding + 解压后再注入）；确认手机 URL 是脚本打印的 ngrok 地址而非 127.0.0.1 |
 | 登录页不弹（进了 DSH） | 浏览器 cookie/basic 凭据仍有效——正常行为 | 无需处理；想强制重登：清站点数据或换无痕 |
 | 随机域名下重启后 URL 变了 | 未填 `ngrok_host`，ngrok 每次分配临时域名 | 接受（日志会打印新 URL），或注册填静态域名（§4①） |
 
@@ -183,7 +190,7 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 - **会话**：内存 Map（token→过期时间），Set-Cookie `dsh_session` HttpOnly SameSite=Lax，24h；>256 条时惰性清理过期（防无限增长）。
 - **登录防爆破**：连续失败 >5 次 → 延迟 1s（每来源计数，5 分钟窗口自清）。来源取 `X-Forwarded-For`（ngrok 场景 socket 端恒为 127.0.0.1，XFF 才是真实客户端 ip）。
 - **兼容 basic-auth**：`Authorization: Basic <user:pass>` 命中直接放行（浏览器记住的旧凭据也能进）；用 `crypto.timingSafeEqual` 恒定时间比较（防时序侧信道）。
-- **响应注入**：`selfHandleResponse:true` 手动回写；HTML 缓冲 → `</head>` 前插 `<script>` polyfill（**无条件注入**——polyfill 幂等，勿用 `includes('AbortSignal')` 做 guard，页面含该字样会跳过注入）→ **重算 `content-length`**（否则截断）；其他类型原样 pipe；上游流异常兜底销毁连接防挂起。
+- **响应注入**：`selfHandleResponse:true` 手动回写；HTML 缓冲 → **若上游带 `content-encoding: gzip/br/deflate` 先解压成明文**（转发前也已剥离 Accept-Encoding，双保险）→ `</head>` 前插 `<script>` polyfill（**无条件注入**——polyfill 幂等，勿用 `includes('AbortSignal')` 做 guard，页面含该字样会跳过注入）→ 去掉 content-length/TE/connection/content-encoding/vary 后以 **chunked 明文**回包（旧版曾写死 content-length，导致与上游 chunked 冲突报 Parse Error——v12 起统一不写长度，浏览器同样正确读全）；其他类型原样 pipe；上游流异常兜底销毁连接防挂起。
 - **WS 转发**：`upgrade` 事件 → 校验 cookie（无 → 403 应用层拒绝，不带 WWW-Authenticate，不弹框）→ `proxy.ws` 转发；同样剥离 Origin。
 - **polyfill 内容**：AbortSignal.any/timeout、Promise.withResolvers、URL.canParse、Object.hasOwn、Array.at/findLast/findLastIndex。
 - **密码不硬编码**：`DSH_PROXY_USER` / `DSH_PROXY_PASSWORD` 环境变量读取，未设置则拒绝启动。
@@ -204,7 +211,7 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 
 ## 12. 变更记录
 
-- **v11（2026-09-05）**：删除 **`start_ngrok.bat` / `start_ngrok.ps1`**（v10 曾加入的「只开隧道」脚本）——整链（proxy+ngrok+dsh web）由 `start_remote_all.bat` 一键覆盖，单开隧道工具无独立价值，移除以免混淆；README §3/§6 相关行同步删除。
+- **v12（2026-09-07）**：修复新版 dsh（≥ 0.1.2-rc.1）的**浏览器会话认证**——手机访问显示"需要 dsh web 授权"。① proxy 新增**换票自愈**：dsh 返回 401 时 302 到 `/?token=<dsh 启动 token>`，由 dsh 原生换 signed cookie（不再复制 dsh 内部 cookie 格式）；token 由一键脚本启动 dsh 时捕获写入 `proxy/dsh_token.txt`（`DSH_PROXY_DSH_TOKEN` 可覆盖，proxy 每请求读取，token 轮换无需重启）。② 修复**远程场景 gzip 破坏注入**：上游回 gzip/br 时旧代码向压缩流注入 polyfill 损坏响应（手机"socket hang up"）；v12 剥离 Accept-Encoding + html 分支防御性解压 → 明文注入 → chunked 明文回包（不再写死 content-length，消除此前 CL+TE 并存 Parse Error 隐患）。③ 一键脚本（.bat/.ps1 与 .sh 同步）：dsh web 启动输出逐行捕获 token 写入 proxy/dsh_token.txt；**proxy 也改为强制重启**（与应用代码更新）；proxy/dsh_token.txt 已加入 .gitignore（内含每进程随机 token，勿提交）。适配版本基线（0.1.2-rc.1）与升级再适配指引见 **§13**。
 - **v10（2026-09-05）**：新增 **`start_ngrok.bat` / `start_ngrok.ps1`（只开 ngrok 隧道）**——双击即可：读 config.json 的 `ngrok_token`/`ngrok_host`（token 无效则交互询问写回）、只用本地 `ngrok\ngrok.exe`（避开 PATH 上 winget v3.3.1 旧版）、默认转发 3200（dsh-proxy，`-Port` 可改）、已在跑则直接打印现有 URL、前台同窗运行（关窗=停）。
 - **v9（2026-08-24）**：新增 **DSH 的 npm 安装说明**——§2 依赖表加 dsh CLI 行；§5 步骤 ② 给出 npm 专用目录安装（mkdir + npm init + npm install @deepseek-ai/dsh，升级 npm update）与可选全局安装；新增「DSH 安装方式对比」表解释为何不用官方 README 的 npx / git clone（npx 缓存路径漂移、版本不可控；源码构建过重）；config.json.temp 的 dsh_install_dir 注释同步指向 §5 ②。
 - **v8（2026-08-24）**：新增 **`start_remote_all.sh`（macOS/Linux 一键脚本）**——自动检测系统架构并下载对应 ngrok 二进制（darwin/linux × amd64/arm64）；ngrok 域名策略改为 **ngrok_host 静态域名优先（注册 ngrok 免费送 .ngrok-free.dev）+ 留空自动随机域名兜底**，trusted-host 以 ngrok API 拿到的真实公网域名为准；config.json.temp/README 全量同步。
@@ -216,3 +223,50 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 - v2：ngrok basic-auth → proxy cookie 会话；polyfill 注入；修复 http-proxy selfHandleResponse 双写头崩溃。
 - v1：初始方案探索（traffic policy basic-auth 语法 5 连踩坑；`--basic-auth` flag 已废弃）。
 - 背景：iOS 16.4 无 `AbortSignal.any` + ngrok basic-auth 对 WS 弹窗 + Tailscale 中国大陆不可登录 → 自建 proxy 层解决全部三问题。
+
+## 13. dsh 版本适配基线与升级再适配（必读）
+
+> 本代理适配的是 **dsh 0.1.2-rc.1** 的行为。dsh 升级可能改掉下列行为，届时需要**按 §13.3 自查并小改**；
+> 设计上已尽量把耦合降到最低（见 §13.2「刻意不耦合」），通常再适配只改一两处字符串/状态码，10 分钟以内。
+
+### 13.1 本次适配基线（2026-09-07 实测）
+
+| 包 | 版本 | 说明 |
+|---|---|---|
+| `@deepseek-ai/dsh` | **0.1.2-rc.1** | CLI / 启动器（`dsh web --trusted-host <域名> --port 3080`） |
+| `@deepseek-ai/dsh-client-connection` | **0.1.2-rc.1** | 浏览器会话认证（token 换票 + signed cookie）在此实现 |
+| `@deepseek-ai/dsh-web-frontend` | **0.1.2-rc.1** | 前端 dist（index HTML + JS bundle，polyfill 注入对象） |
+| `@deepseek-ai/dsh-web-app` | **0.1.2-rc.1** | Web 服务主进程（渲染/静态服务） |
+
+适配依据直接取自安装包源码（`dsh-client-connection/lib/index.js`）与实测：
+
+- `TOKEN_QUERY = "token"`（L199）；换票条件：`GET /` + 仅 1 个 token + `tokenMatches` + Host 可解析 → `303 + Location:/ + Set-Cookie(dsh-auth-*)`（L366-385）；
+- 未换票/无有效 cookie → **401** + 正文 `dsh web authentication required; reopen the URL printed by dsh web.`（L419-424）——手机上看到的「需要 dsh web 授权」即此文案；
+- cookie 按 Host 绑定、实测 30 天（`Max-Age=2592000`），**跨 dsh 重启有效**（密钥持久化，登录一次 30 天内无需再换）；
+- Host 白名单 fence：非 `--trusted-host` 域名 → 403（代理链路只放行 ngrok 静态域名）；
+- 远程访问路径（带 x-forwarded-*）上游会把 HTML 回成 **gzip/br**（实测 3658B gzip ≈ 26.5KB 明文），本地直连为明文。
+
+### 13.2 耦合点清单（dsh 改了这里 → 我方要动）
+
+| # | dsh 现在的行为（0.1.2-rc.1） | 我方的适配（文件位置） | 若 dsh 改了会怎样 / 怎么改 |
+|---|---|---|---|
+| 1 | 缺会话 cookie 时对 `/` 回 **401** | `server.js` heal 分支：dsh 401 且 pathname=`/` 且已过代理认证且无 `?token=` → 302 到 `/?token=<启动token>` | 状态码/判据变了 → 换票不触发（手机仍见授权页）。按新行为调整 heal 条件即可 |
+| 2 | 换票入口 **`/?token=<启动token>`**（`TOKEN_QUERY="token"`），成功回 303+Set-Cookie | 依赖此入口做自愈换票（`dsh_token.txt` 由脚本捕获） | **若 dsh 删除/改名这个入口** → 需更换方案（回退到「读 `.credentials.yaml` 密钥复刻 cookie」——该方案已在独立实例验证过构造正确，见 SESSION_MEMORY，或跟随 dsh 新机制） |
+| 3 | 启动时打印 `dsh web: http://127.0.0.1:3080/?token=xxx` | `start_remote_all.ps1/_Dsh-Line` 正则捕获写 `proxy/dsh_token.txt` | 输出格式变了 → 捕获失败（`dsh_token.txt` 无更新）。改正则即可；也可用 `DSH_PROXY_DSH_TOKEN` 环境变量兜底 |
+| 4 | `--trusted-host <域名>` 白名单 fence（403） | 脚本以 ngrok 真实公网域名启动 dsh | 参数名/语义变了 → 远程 403。改脚本启动参数 |
+| 5 | 远程路径 HTML 回 **gzip/br/deflate** | `server.js`：转发前剥 `Accept-Encoding` + html 分支防御性解压 → 明文注入 | 压缩算法变了 → 增加对应解压分支（现有 gzip/br/deflate 已覆盖主流） |
+| 6 | WS 握手认 cookie 会话 | proxy cookie 会话（登录一次全通） | 握手鉴权方式变了 → 调整 upgrade 分支 |
+| 7 | 前端（index bundle）用 `AbortSignal.any` 等新 API | 无条件注入 polyfill（幂等，勿加 `includes` guard） | 页面用了更新的 API → 扩 polyfill 即可 |
+
+### 13.3 刻意不耦合的部分（dsh 怎么改都不用动）
+
+- **cookie 内部格式**：名字（`dsh-auth-<sha256(authority)>`）、载荷 (`v1.{...}.{hmac}`)、密钥存储（`.credentials.yaml` 的 `client-connection/browser-session`）。v12 改用「dsh 原生换票」，不复制这些格式——只要 `/?token=` 换票入口还在，dsh 随便改 cookie 细节都不影响本代理。
+- **签名密钥读取**：曾实现「读密钥复刻 cookie」并验证构造正确，但 live 实例拒收（疑进程内存密钥≠磁盘记录，成因未决）→ 弃用密钥方案、改用 token 换票，顺带把这块耦合彻底去掉。
+
+### 13.4 升级 dsh 后自查（runbook，约 10 分钟）
+
+1. 升级：在 `dsh_install_dir` 执行 `npm update @deepseek-ai/dsh`（或官方升级方式）。
+2. 重跑 `start_remote_all.bat`（脚本自动重启 dsh + 捕获新 token + 重启 proxy）。
+3. 无痕窗口走完整链路（§7 验证命令 + 下面完整链路）：登录 proxy → `GET /`（302 换票）→ `/?token=`（303+Set-Cookie）→ `GET /` **200 且含 polyfill**。
+4. 手机实测一遍；若出现「需要 dsh web 授权」→ 查 §8 对应行；若 401 文案/换票参数已变 → 对照 §13.2 表改 `server.js` 对应处。
+5. 把新基线版本与改动补进 §13.1 与 §12 变更记录。

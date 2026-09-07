@@ -4,14 +4,33 @@
 //   2. 向 HTML 页面注入 AbortSignal.any/timeout polyfill（iOS < 17.4 兼容）
 //   3. 剥离 Origin 头：绕开 dsh web browser-trust fence 的 "Origin 须与 Host 精确同源" 校验
 //   4. 转发 HTTP + WebSocket 到 127.0.0.1:3080（dsh web）
+//   5. dsh web 浏览器会话认证（新版 dsh ≥ 0.1.2-rc.1）：dsh web 要求浏览器先用启动 token
+//      换 signed cookie（无则返回 401 "dsh web authentication required"，手机上即"需要 dsh web
+//      授权"）。本 proxy 在上游返回该 401 时，对已过本 proxy 认证的访问 302 到
+//      /?token=<dsh 启动 token>，由 dsh **原生**完成换票（按 Host 签发 domain 绑定 cookie，
+//      302 回干净 /）——不复制 dsh 内部 cookie 格式，天然兼容 dsh 版本升级。
+//      token 来源：start_remote_all(.ps1/.bat/.sh) 启动 dsh web 时捕获其打印的 URL 写入
+//      proxy/dsh_token.txt；环境变量 DSH_PROXY_DSH_TOKEN 可覆盖。
+//   6. 上游 gzip 处理：dsh 上游在远程访问场景会把 HTML 回成 gzip/br；注入 polyfill 必须在
+//      明文上做（对压缩流注入会破坏响应，手机表现为连接中断）。故转发前剥离 Accept-Encoding，
+//      html 分支再防御性解压（content-encoding: gzip/br/deflate → 明文），并去掉
+//      content-encoding/vary 后以 chunked 明文回包。
+// 适配版本基线：@deepseek-ai/dsh 系列（dsh / dsh-client-connection / dsh-web-frontend /
+//      dsh-web-app）0.1.2-rc.1（2026-09-07 实测）。耦合点清单与 dsh 升级后的再适配指引
+//      见 dsh-remote/README.md §13（§13.4 runbook：升级后 ~10 分钟自查）。
 // 用法：
 //   set DSH_PROXY_USER=dsh && set DSH_PROXY_PASSWORD=你的强密码
+//   set DSH_PROXY_DSH_TOKEN=当前 dsh web 的启动 token （可选；缺省读本目录 dsh_token.txt）
+//   set DSH_PROXY_TARGET=http://127.0.0.1:3080 （可选；缺省同上）
 //   npm install http-proxy   （本项目目录）
 //   node server.js
 'use strict';
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { URL } = require('url');
+const zlib = require('zlib');
 const httpProxy = require('http-proxy');
 
 const PORT = Number(process.env.DSH_PROXY_PORT || 3200);
@@ -73,6 +92,20 @@ function basicOk(req) {
   const h = req.headers['authorization'] || '';
   if (!h.startsWith('Basic ')) return false;
   return safeEqual(h.slice(6), Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64'));
+}
+
+// ---------- dsh web 浏览器会话认证（功能 5） ----------
+// 新版 dsh（≥ 0.1.2-rc.1）要求浏览器先用"每进程启动 token"换 signed cookie 才能访问根页面
+// （无有效 cookie → 401 "dsh web authentication required"，手机页面上即"需要 dsh web 授权"）。
+// 本 proxy 不复制 dsh 的 cookie 内部格式，而是把 401 重定向到 <同路径>?token=<启动 token>，
+// 交给 dsh 自己完成换票：dsh 按请求 Host 签发 domain 绑定签名 cookie（30 天，跨 dsh 重启有效），
+// 302 回干净的 / —— 手机登录一次即全通，且天然兼容 dsh 版本升级。
+// token 由 start_remote_all(.ps1/.bat/.sh) 启动 dsh web 时捕获其打印的 URL 写入
+// proxy/dsh_token.txt；环境变量 DSH_PROXY_DSH_TOKEN 可覆盖。
+function loadDshToken() {
+  const fromEnv = (process.env.DSH_PROXY_DSH_TOKEN || '').trim();
+  if (fromEnv) return fromEnv;
+  try { return fs.readFileSync(path.join(__dirname, 'dsh_token.txt'), 'utf8').trim(); } catch { return ''; }
 }
 
 // ---------- 登录页 ----------
@@ -197,6 +230,9 @@ const server = http.createServer((req, res) => {
 
   // 已认证 → 转发；剥离 Origin：让 fence 走"无 Origin → 放行"分支（Host 白名单校验仍在）
   delete req.headers.origin;
+  // 剥离 Accept-Encoding：dsh 上游在远程访问场景会回 gzip。polyfill 注入依赖明文 HTML，
+  // 压缩流注入会损坏响应（手机端即表现为连接中断/超时）——强制上游明文后再注入。
+  delete req.headers['accept-encoding'];
   proxy.web(req, res, { target: TARGET }, (err) => {
     res.writeHead(502);
     res.end('proxy error: ' + err.message);
@@ -205,16 +241,48 @@ const server = http.createServer((req, res) => {
 
 // 拦截响应做 polyfill 注入（selfHandleResponse:true 后由本处理器统一回写）
 proxy.on('proxyRes', (proxyRes, req, res) => {
+  // 功能 5：dsh web 返回 "authentication required"（401，缺浏览器会话）且客户端已过本 proxy 认证
+  // → 302 到 /?token=<dsh 启动 token>，由 dsh 原生换票（自愈：已登录过本 proxy 的老会话同样直接救活）
+  if (proxyRes.statusCode === 401 && req.method === 'GET') {
+    const u = new URL(req.url, 'http://x');
+    const hadProxySession = sessionOk(req) || basicOk(req);
+    // 已带 ?token= 的换票请求不再二次重定向（防 token 失效时无限 302 循环）
+    if (hadProxySession && u.pathname === '/' && !u.searchParams.has('token')) {
+      const dshToken = loadDshToken();
+      if (dshToken) {
+        proxyRes.resume(); // 排空上游 401 响应体
+        res.writeHead(302, { 'cache-control': 'no-store', location: '/?token=' + encodeURIComponent(dshToken) });
+        res.end();
+        console.log('[dsh-proxy] redirect to dsh token exchange (authority=' + String(req.headers.host) + ')');
+        return;
+      }
+    }
+  }
   const ct = proxyRes.headers['content-type'] || '';
   if (ct.includes('text/html')) {
     const chunks = [];
     proxyRes.on('data', (c) => chunks.push(c));
     proxyRes.on('end', () => {
-      const html = Buffer.concat(chunks).toString('utf8');
+      let buf = Buffer.concat(chunks);
+      // 防御：即便上游仍回压缩内容（个别上游可能无视 Accept-Encoding 剥离），先还原成明文再注入
+      const ce = String(proxyRes.headers['content-encoding'] || '').toLowerCase();
+      try {
+        if (ce === 'gzip' || ce === 'x-gzip') buf = zlib.gunzipSync(buf);
+        else if (ce === 'br') buf = zlib.brotliDecompressSync(buf);
+        else if (ce === 'deflate') buf = zlib.inflateSync(buf);
+      } catch (err) {
+        console.error('[dsh-proxy] decompress error (' + ce + '): ' + err.message + ' — 按原样转发');
+      }
+      const html = buf.toString('utf8');
       const out = injectPolyfill(html);
       const headers = Object.assign({}, proxyRes.headers);
-      delete headers['content-length'];          // 注入后体积变化：删除旧长度，避免浏览器按旧长度截断
-      headers['content-length'] = Buffer.byteLength(out, 'utf8');
+      delete headers['content-length'];          // 注入后体积变化：旧长度不再成立
+      delete headers['transfer-encoding'];       // 上游可能是 chunked 动态渲染（如 Host 非 loopback 时）
+      delete headers['connection'];              // hop-by-hop，交由本机 Node 决定
+      delete headers['content-encoding'];        // 已解压为明文
+      delete headers['vary'];                    // 恒回明文，不再有 AE 变体
+      // 不再重算 content-length：不写 Content-Length + res.end() → Node 自动用 Transfer-Encoding: chunked
+      // 回包（浏览器同样正确读全，且实测 chunked 走 ngrok 隧道稳定；写死长度反而会在代理/隧道链路触发帧错乱）。
       res.writeHead(proxyRes.statusCode, headers);
       res.end(out);
     });

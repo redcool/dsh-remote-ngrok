@@ -7,3 +7,6 @@ ngrok/
 
 # proxy 依赖（package.json 已声明，clone 后 npm install）
 proxy/node_modules/
+
+# proxy 启动时捕获的当前 dsh web 启动 token（每进程随机、dsh 重启即变；内含机密，勿提交）
+proxy/dsh_token.txt

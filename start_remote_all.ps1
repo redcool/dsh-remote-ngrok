@@ -2,7 +2,7 @@
 # DSH 远程访问 · 一键拉起（proxy + ngrok + dsh web 全链路）
 # 用法：双击 start_remote_all.bat（或在本目录跑本 ps1）
 # 链路：手机/浏览器 → ngrok(TLS) → dsh-proxy(127.0.0.1:3200) → dsh web(127.0.0.1:3080)
-# 幂等：proxy/ngrok 已在跑的不重启；**dsh web 强制重启**（2026-08-27 用户：双击 = kill 当前 dsh 进程再拉起，保证配置/版本更新生效）
+# 幂等：ngrok 已在跑的不重启；**proxy 与 dsh web 均强制重启**（2026-08-27 用户：双击 = kill 当前 dsh 进程再拉起，保证配置/版本更新生效；2026-09-07 起 proxy 同样强制重启以应用代码更新）
 # 配置：读 config.json（模板 config.json.temp 复制改名后填写：ngrok_token / dsh_install_dir / dsh_home / ngrok_host / proxy_user / proxy_password）
 # ============================================================
 
@@ -96,15 +96,33 @@ function _Save-CfgToken([string]$token) {
   [System.IO.File]::WriteAllText($script:cfgFile, ($cfg | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
 }
 
-# ① dsh-proxy（3200：cookie 会话认证 + iOS polyfill + Origin 剥离——手机能用的关键层）
-if (Test-PortListen 3200) {
-  Write-Host "[*] proxy 已在跑（3200）— 跳过"
-} else {
-  Write-Host "[*] 启动 dsh-proxy（3200）..."
-  Start-Process -FilePath "node" -ArgumentList "server.js" -WorkingDirectory $proxyDir -WindowStyle Hidden
-  Start-Sleep -Seconds 3
-  if (Test-PortListen 3200) { Write-Host "[+] proxy 3200 在线" } else { Write-Host "[!] proxy 启动失败（查 DSH_PROXY_PASSWORD 环境变量 / proxy/node_modules）" -ForegroundColor Red }
+## 捕获 dsh web 启动时打印的 "dsh web: http://127.0.0.1:3080/?token=<启动token>" 行，
+## 把 token 写入 proxy/dsh_token.txt —— proxy 收到 dsh 的 401（"dsh web authentication required"）时
+## 用它 302 到 /?token=... 让 dsh 原生换浏览器会话 cookie（手机不用复制 token）。
+## 幂等：每次 dsh 重启 token 都会变，本函数每次启动都会覆写；proxy 每请求读该文件，无需随 token 变化重启。
+function _Dsh-Line([string]$line) {
+  Write-Host $line
+  $m = [regex]::Match($line, '//[^/]+/\?token=([A-Za-z0-9_\-]+)')
+  if ($m.Success) {
+    try {
+      [System.IO.File]::WriteAllText((Join-Path $proxyDir 'dsh_token.txt'), $m.Groups[1].Value, (New-Object System.Text.UTF8Encoding($false)))
+      Write-Host "[+] 已记录 dsh 启动 token（proxy 自动换票用；也可手动粘贴到 proxy\dsh_token.txt）" -ForegroundColor DarkGray
+    } catch { Write-Host "[!] 写 dsh_token.txt 失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+  }
 }
+
+# ① dsh-proxy（3200：cookie 会话认证 + iOS polyfill + Origin 剥离 + dsh token 换票——手机能用的关键层）
+# 2026-09-07：与 dsh web 同理，proxy 也强制重启——保证最新代理代码生效（proxy/dsh_token.txt 每请求读取，token 变化无需重启）
+$proxyConn = Get-NetTCPConnection -LocalPort 3200 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($proxyConn) {
+  Stop-Process -Id $proxyConn.OwningProcess -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+  Write-Host "[*] 已停旧 proxy（强制重启：3200 旧进程 PID $($proxyConn.OwningProcess)）"
+}
+Write-Host "[*] 启动 dsh-proxy（3200）..."
+Start-Process -FilePath "node" -ArgumentList "server.js" -WorkingDirectory $proxyDir -WindowStyle Hidden
+Start-Sleep -Seconds 3
+if (Test-PortListen 3200) { Write-Host "[+] proxy 3200 在线" } else { Write-Host "[!] proxy 启动失败（查 DSH_PROXY_PASSWORD 环境变量 / proxy/node_modules）" -ForegroundColor Red }
 
 # ② ngrok（→3200！不要直连 3080——绕过 proxy 手机会崩）
 if (Test-PortListen 4040) {
@@ -164,9 +182,10 @@ if (-not $webOk) {
     if ($script:dshHome) { $env:DSH_HOME = $script:dshHome }
     if (Test-Path $shim) {
       # 前台调用 dsh.cmd（cmd 包装 → node）：阻塞在本窗口，关窗 = 终止进程树 = 关 dsh
-      & $shim web --port 3080 --trusted-host $tunnelHost --no-open
+      # 2>&1 逐行过 _Dsh-Line：既保持控制台输出，又捕获启动 URL 里的 token → proxy/dsh_token.txt
+      & $shim web --port 3080 --trusted-host $tunnelHost --no-open 2>&1 | ForEach-Object { _Dsh-Line $_ }
     } else {
-      node (Join-Path $script:dshInstallDir "node_modules\@deepseek-ai\dsh\lib\bin.js") web --port 3080 --trusted-host $tunnelHost --no-open
+      node (Join-Path $script:dshInstallDir "node_modules\@deepseek-ai\dsh\lib\bin.js") web --port 3080 --trusted-host $tunnelHost --no-open 2>&1 | ForEach-Object { _Dsh-Line $_ }
     }
     # dsh 退出后（窗口被关/手动 Ctrl+C）回到这里
     Write-Host "[*] dsh web 已停止" -ForegroundColor DarkGray
