@@ -192,7 +192,7 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 - **兼容 basic-auth**：`Authorization: Basic <user:pass>` 命中直接放行（浏览器记住的旧凭据也能进）；用 `crypto.timingSafeEqual` 恒定时间比较（防时序侧信道）。
 - **响应注入**：`selfHandleResponse:true` 手动回写；HTML 缓冲 → **若上游带 `content-encoding: gzip/br/deflate` 先解压成明文**（转发前也已剥离 Accept-Encoding，双保险）→ `</head>` 前插 `<script>` polyfill（**无条件注入**——polyfill 幂等，勿用 `includes('AbortSignal')` 做 guard，页面含该字样会跳过注入）→ 去掉 content-length/TE/connection/content-encoding/vary 后以 **chunked 明文**回包（旧版曾写死 content-length，导致与上游 chunked 冲突报 Parse Error——v12 起统一不写长度，浏览器同样正确读全）；其他类型原样 pipe；上游流异常兜底销毁连接防挂起。
 - **WS 转发**：`upgrade` 事件 → 校验 cookie（无 → 403 应用层拒绝，不带 WWW-Authenticate，不弹框）→ `proxy.ws` 转发；同样剥离 Origin。
-- **polyfill 内容**：AbortSignal.any/timeout、Promise.withResolvers、URL.canParse、Object.hasOwn、Array.at/findLast/findLastIndex。
+- **polyfill 内容**：AbortSignal.any/timeout、Promise.withResolvers、URL.canParse、Object.hasOwn、Array.at/findLast/findLastIndex；v13 起追加 **Iterator**（含 `Iterator.prototype.join`/`[Symbol.iterator]`，并挂载到生成器与 Map/Set/Array 迭代器原型）、**URL.parse**、**Promise.try**——三者 iOS < 17.4/18 缺失，dsh 0.1.5 新增的 `dsh-client-ui-sidebar-documentpreview`（PDF.js）会引用 `Iterator`，缺则手机报 `Failed to load plugins`。
 - **密码不硬编码**：`DSH_PROXY_USER` / `DSH_PROXY_PASSWORD` 环境变量读取，未设置则拒绝启动。
 
 ## 10. 安全提醒
@@ -211,6 +211,7 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 
 ## 12. 变更记录
 
+- **v13（2026-09-16）**：适配 **dsh 0.1.5-rc.1/rc.2** 升级——手机（iOS 16.4 WebKit）报 `Failed to load plugins`。根因：0.1.5 新增的 `dsh-client-ui-sidebar-documentpreview`（PDF.js）在 bundle 顶层执行 `typeof Iterator.prototype.join !== 'function'` 引用了 **ES2024 `Iterator` 全局**，而 iOS < 17.4 无此对象 → ReferenceError → 插件 import 失败。① proxy polyfill 追加 **Iterator shim**（`Iterator` 构造 + `Iterator.prototype.join`/`[Symbol.iterator]`，并挂载到生成器与 Map/Set/Array 迭代器原型——iOS 16.4 上这些原生迭代器不共享 `Iterator.prototype`）、**URL.parse**、**Promise.try**（同为 PDF.js 用到的缺失 API），全部 typeof 守卫幂等；② 顺带验证：better-sidebar 0.18→0.19.1 不是本问题的成因（卸载/重装无影响）。
 - **v12（2026-09-07）**：修复新版 dsh（≥ 0.1.2-rc.1）的**浏览器会话认证**——手机访问显示"需要 dsh web 授权"。① proxy 新增**换票自愈**：dsh 返回 401 时 302 到 `/?token=<dsh 启动 token>`，由 dsh 原生换 signed cookie（不再复制 dsh 内部 cookie 格式）；token 由一键脚本启动 dsh 时捕获写入 `proxy/dsh_token.txt`（`DSH_PROXY_DSH_TOKEN` 可覆盖，proxy 每请求读取，token 轮换无需重启）。② 修复**远程场景 gzip 破坏注入**：上游回 gzip/br 时旧代码向压缩流注入 polyfill 损坏响应（手机"socket hang up"）；v12 剥离 Accept-Encoding + html 分支防御性解压 → 明文注入 → chunked 明文回包（不再写死 content-length，消除此前 CL+TE 并存 Parse Error 隐患）。③ 一键脚本（.bat/.ps1 与 .sh 同步）：dsh web 启动输出逐行捕获 token 写入 proxy/dsh_token.txt；**proxy 也改为强制重启**（与应用代码更新）；proxy/dsh_token.txt 已加入 .gitignore（内含每进程随机 token，勿提交）。适配版本基线（0.1.2-rc.1）与升级再适配指引见 **§13**。
 - **v10（2026-09-05）**：新增 **`start_ngrok.bat` / `start_ngrok.ps1`（只开 ngrok 隧道）**——双击即可：读 config.json 的 `ngrok_token`/`ngrok_host`（token 无效则交互询问写回）、只用本地 `ngrok\ngrok.exe`（避开 PATH 上 winget v3.3.1 旧版）、默认转发 3200（dsh-proxy，`-Port` 可改）、已在跑则直接打印现有 URL、前台同窗运行（关窗=停）。
 - **v9（2026-08-24）**：新增 **DSH 的 npm 安装说明**——§2 依赖表加 dsh CLI 行；§5 步骤 ② 给出 npm 专用目录安装（mkdir + npm init + npm install @deepseek-ai/dsh，升级 npm update）与可选全局安装；新增「DSH 安装方式对比」表解释为何不用官方 README 的 npx / git clone（npx 缓存路径漂移、版本不可控；源码构建过重）；config.json.temp 的 dsh_install_dir 注释同步指向 §5 ②。
@@ -237,6 +238,7 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 | `@deepseek-ai/dsh-client-connection` | **0.1.2-rc.1** | 浏览器会话认证（token 换票 + signed cookie）在此实现 |
 | `@deepseek-ai/dsh-web-frontend` | **0.1.2-rc.1** | 前端 dist（index HTML + JS bundle，polyfill 注入对象） |
 | `@deepseek-ai/dsh-web-app` | **0.1.2-rc.1** | Web 服务主进程（渲染/静态服务） |
+| （2026-09-16 实测）`@deepseek-ai/dsh` 全家桶 | **0.1.5-rc.1 / 0.1.5-rc.2** | 升级后仅需追加 v13 polyfill（Iterator/URL.parse/Promise.try），token 换票 / 401 文案 / gzip 行为均不变，见 §13.2 #8 |
 
 适配依据直接取自安装包源码（`dsh-client-connection/lib/index.js`）与实测：
 
@@ -256,7 +258,8 @@ curl.exe -s -b $env:TEMP\c.txt -H "Origin: https://<ngrok-url>" -w "`n%{http_cod
 | 4 | `--trusted-host <域名>` 白名单 fence（403） | 脚本以 ngrok 真实公网域名启动 dsh | 参数名/语义变了 → 远程 403。改脚本启动参数 |
 | 5 | 远程路径 HTML 回 **gzip/br/deflate** | `server.js`：转发前剥 `Accept-Encoding` + html 分支防御性解压 → 明文注入 | 压缩算法变了 → 增加对应解压分支（现有 gzip/br/deflate 已覆盖主流） |
 | 6 | WS 握手认 cookie 会话 | proxy cookie 会话（登录一次全通） | 握手鉴权方式变了 → 调整 upgrade 分支 |
-| 7 | 前端（index bundle）用 `AbortSignal.any` 等新 API | 无条件注入 polyfill（幂等，勿加 `includes` guard） | 页面用了更新的 API → 扩 polyfill 即可 |
+| 7 | 前端（index bundle 或 client 插件）用 `AbortSignal.any` 等新 API | 无条件注入 polyfill（幂等，勿加 `includes` guard） | 页面用了更新的 API → 扩 polyfill 即可 |
+| 8 | **0.1.5 新增** `dsh-client-ui-sidebar-documentpreview`（PDF.js）bundle 顶层引用 **ES2024 `Iterator` 全局**（`typeof Iterator.prototype.join !== 'function'`），且用 `URL.parse` / `Promise.try`；iOS < 17.4 无 `Iterator`、iOS < 17.4 无 `URL.parse`、Safari < 18 无 `Promise.try`，缺失时手机报 `Failed to load plugins` | v13 polyfill：注入 `Iterator`（`join` + `[Symbol.iterator]`，含生成器/Map/Set/Array 迭代器原型挂载）、`URL.parse`、`Promise.try` | 前端又引用更新的 ES 提案 API（如 `Object.groupBy`、`Array.fromAsync`、`RegExp.escape`）→ 按同样模式扩 polyfill（注意与语法差异不同：polyfill 只救 API 缺失，救不了新语法解析失败） |
 
 ### 13.3 刻意不耦合的部分（dsh 怎么改都不用动）
 

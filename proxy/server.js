@@ -175,6 +175,64 @@ const POLYFILL = `(function(){
       Array.prototype.at = function(n){ n = Math.trunc(n) || 0; if (n < 0) n += this.length; return n >= 0 && n < this.length ? this[n] : undefined; };
     }
   }
+  // ---- ES2024 Iterator Helpers shim (iOS < 17.4 lacks global Iterator) ----
+  // dsh-client-ui-sidebar-documentpreview (PDF.js) runs:
+  //   if (typeof Iterator.prototype.join !== 'function') Iterator.prototype.join = ...
+  // which throws ReferenceError where the Iterator global is absent.
+  var _itJoin = function(separator){
+    var it = this, s = separator === undefined ? ',' : String(separator);
+    if (it != null && typeof it[Symbol.iterator] === 'function' && typeof it.next !== 'function') it = it[Symbol.iterator]();
+    var out = [], r;
+    while (true) { r = it.next(); if (r.done) break; out.push(String(r.value)); }
+    return out.join(s);
+  };
+  if (typeof Iterator === 'undefined') {
+    var IteratorCtor = function Iterator(){ throw new TypeError('Iterator is not a constructor'); };
+    var _itProto = { join: _itJoin };
+    if (typeof Symbol !== 'undefined' && Symbol.iterator) _itProto[Symbol.iterator] = function(){ return this; };
+    IteratorCtor.prototype = _itProto;
+    try { Object.defineProperty(globalThis, 'Iterator', { value: IteratorCtor, writable: true, configurable: true }); }
+    catch(e){ try { (typeof window !== 'undefined' ? window : globalThis).Iterator = IteratorCtor; } catch(e2){} }
+  } else {
+    try { if (typeof Iterator.prototype.join !== 'function') Iterator.prototype.join = _itJoin; } catch(e){}
+  }
+  // expose join on built-in iterator prototypes too (Map/Set/Array iterators)
+  if (typeof Symbol !== 'undefined' && Symbol.iterator) {
+    try {
+      var _builtins = [];
+      try { _builtins.push([][Symbol.iterator]()); } catch(e){}
+      try { _builtins.push(new Map().values()); } catch(e){}
+      try { _builtins.push(new Set().values()); } catch(e){}
+      try { _builtins.push(new Map().keys()); } catch(e){}
+      try { _builtins.push(new Map().entries()); } catch(e){}
+      // generator prototype (function* objects) does not link to Iterator.prototype on iOS 16.4
+      try {
+        var _genObj = (function*(){ var _gx = 1; yield _gx; })();
+        var _genProto = Object.getPrototypeOf(_genObj);
+        if (_genProto && typeof _genProto.join !== 'function') _genProto.join = _itJoin;
+      } catch(e){}
+      for (var bi = 0; bi < _builtins.length; bi++) {
+        var bp = Object.getPrototypeOf(_builtins[bi]);
+        if (bp && typeof bp.join !== 'function') { try { bp.join = _itJoin; } catch(e){} }
+      }
+    } catch(e){}
+  }
+  // ---- URL.parse (Safari/iOS < 17.4) ----
+  if (typeof URL !== 'undefined' && typeof URL.parse !== 'function') {
+    URL.parse = function(u, base){
+      try { return typeof base === 'undefined' ? new URL(u) : new URL(u, base); }
+      catch(e){ return null; }
+    };
+  }
+  // ---- Promise.try (Safari < 18) ----
+  if (typeof Promise !== 'undefined' && typeof Promise.try !== 'function') {
+    Promise.try = function(fn){
+      var args = Array.prototype.slice.call(arguments, 1);
+      return new Promise(function(resolve, reject){
+        try { resolve(fn.apply(null, args)); } catch(e){ reject(e); }
+      });
+    };
+  }
 })();`;
 
 function injectPolyfill(html) {
