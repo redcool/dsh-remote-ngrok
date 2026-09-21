@@ -96,12 +96,26 @@ function _Save-CfgToken([string]$token) {
   [System.IO.File]::WriteAllText($script:cfgFile, ($cfg | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
 }
 
-## 捕获 dsh web 启动时打印的 "dsh web: http://127.0.0.1:3080/?token=<启动token>" 行，
+## dsh web 运行日志（2026-09-19 加）：dsh 所有 stdout/stderr 逐行落盘，带时间戳——
+## 每行也过 _Dsh-Line（下一函数）：既有控制台输出，又捕获启动 URL 里的 token → proxy/dsh_token.txt，还落盘到日志。
+## 进程莫名退出时能翻到最后一行看死前输出（排查"静默退出"用）。每次启动轮换：旧日志 → dsh-web.prev.log
+$script:dshWebLog = Join-Path $toolsDir "logs\dsh-web.log"
+$script:dshWebLogPrev = Join-Path $toolsDir "logs\dsh-web.prev.log"
+try {
+  $logDir = Split-Path -Parent $script:dshWebLog
+  if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+  if (Test-Path $script:dshWebLog) { Copy-Item $script:dshWebLog $script:dshWebLogPrev -Force -ErrorAction SilentlyContinue }
+  [System.IO.File]::WriteAllText($script:dshWebLog, "=== dsh web log start " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " ===" + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+} catch { Write-Host "[!] 初始化 dsh-web.log 失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+
 ## 把 token 写入 proxy/dsh_token.txt —— proxy 收到 dsh 的 401（"dsh web authentication required"）时
 ## 用它 302 到 /?token=... 让 dsh 原生换浏览器会话 cookie（手机不用复制 token）。
 ## 幂等：每次 dsh 重启 token 都会变，本函数每次启动都会覆写；proxy 每请求读该文件，无需随 token 变化重启。
 function _Dsh-Line([string]$line) {
   Write-Host $line
+  try {
+    [System.IO.File]::AppendAllText($script:dshWebLog, (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff") + " " + $line + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+  } catch { }
   $m = [regex]::Match($line, '//[^/]+/\?token=([A-Za-z0-9_\-]+)')
   if ($m.Success) {
     try {
@@ -155,6 +169,22 @@ if ($script:tunnelUrl) {
   Get-Content (Join-Path $toolsDir "ngrok\ngrok_err.log") -Tail 3 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   $_" -ForegroundColor DarkGray }
 }
 
+# ②½ 自动拉起 dsh web 看门狗（watchdog）：本启动链路每次运行时确保 watchdog 常驻——
+# 若 dsh 挂掉，watchdog 检测到 3080 空闲 ~15 秒后自动重跑本 bat，保证 dsh 及时重上线。
+# watchdog 自带单实例锁（同会话只跑一个），多开自动让位，不会互相打架。
+$wdScript = Join-Path $toolsDir "watch-dsh-restart.ps1"
+if (Test-Path $wdScript) {
+  $wdRunning = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'watch-dsh-restart' } | Select-Object -First 1
+  if (-not $wdRunning) {
+    try {
+      Start-Process powershell.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Minimized","-File",$wdScript
+      Write-Host "[*] watchdog 已拉起（dsh 挂了将自动重跑本脚本）" -ForegroundColor DarkGray
+    } catch { Write-Host "[!] watchdog 拉起失败：$($_.Exception.Message)" -ForegroundColor Yellow }
+  } else {
+    Write-Host "[*] watchdog 已在运行（PID $($wdRunning.ProcessId)），跳过拉起" -ForegroundColor DarkGray
+  }
+}
 # ③ dsh web（3080：带 --trusted-host 前台运行——bat 窗口即宿主，关窗 = 关 dsh）
 # 2026-08-27 用户：双击启动 = 强制重启链路 → 无条件停掉当前在跑的 dsh web（3080 占用者），再拉新实例。
 # trusted-host 以 ngrok 真实公网域名为准（随机域名下 config 的 ngrok_host 可能为空）
@@ -187,8 +217,9 @@ if (-not $webOk) {
     } else {
       node (Join-Path $script:dshInstallDir "node_modules\@deepseek-ai\dsh\lib\bin.js") web --port 3080 --trusted-host $tunnelHost --no-open 2>&1 | ForEach-Object { _Dsh-Line $_ }
     }
-    # dsh 退出后（窗口被关/手动 Ctrl+C）回到这里
+    # dsh 退出后（窗口被关/手动 Ctrl+C / 进程自行退出）回到这里
     Write-Host "[*] dsh web 已停止" -ForegroundColor DarkGray
+    try { [System.IO.File]::AppendAllText($script:dshWebLog, "=== dsh web stopped " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff") + " === (pipeline returned)" + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false))) } catch { }
   }
 }
 
