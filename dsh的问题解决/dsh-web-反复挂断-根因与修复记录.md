@@ -161,3 +161,89 @@ if (this.spillFd === void 0) {
 - [ ] 用 gpt6/codex 会话工作 ≥1 晚，观察 `dsh-web.log` / `watchdog.log` 是否还有挂断
 - [ ] 若再有挂断，检查新崩溃是否仍指向 spill（预期已消失）；若指向他处，按新堆栈继续定位
 - [ ] 长期：建议向上游 dsh 提 issue/PR（spill 打开文件需 try/catch + 目录重建），本补丁是本地先行修复
+
+---
+
+# 附：手机 4G 远程访问变慢——定位与修复（2026-09-22）
+
+## 一、现象
+
+dsh 重启后不再挂断（spill 补丁生效，dsh 19936 连续稳定运行），但**手机浏览器（4G）访问 dsh-remote 明显变慢**。
+
+## 二、链路测速（实测数据）
+
+链路：手机 4G → ngrok(日本 jp 节点) → dsh-proxy(3200) → dsh web(3080)
+
+| 项目 | 本地 3200 | 经 ngrok 公网 | 结论 |
+|---|---|---|---|
+| 首字节 TTFB | 2ms | 250~460ms | ngrok 日节点 RTT 正常（本机环回） |
+| 740KB JS 下载 | 27ms / 27MB/s | 1.1s / 665KB/s | ngrok free 带宽有限（~5Mbps） |
+| 前端总资源 | 4.5MB（91 个文件，JS 3.39MB） | 4.5MB 明文 | **压缩前全部明文传输** |
+
+## 三、根因
+
+1. **proxy 无差别剥离 Accept-Encoding**：`proxy/server.js` 为做 iOS polyfill 注入，对所有请求执行 `delete req.headers["accept-encoding"]` → dsh 上游对静态资源也返回明文，**前端 4.5MB 零压缩**。
+2. **dsh 上游实际支持 gzip**：同一 740KB JS，带 `Accept-Encoding: gzip` 时返回 **209KB（-72%）**。
+3. ngrok free 计划带宽有限（实测 ~665KB/s ≈ 5.3Mbps）+ 日本节点 RTT 叠加，明文 4.5MB 在手机上自然明显卡。
+
+## 四、修复（proxy/server.js）
+
+改为**仅 HTML 请求剥离 Accept-Encoding**（polyfill 注入需要明文 HTML），静态资源（js/css/woff/ttf/svg/png/ico 等）保留压缩，让 dsh 上游 gzip/br 后原样透传。
+
+```js
+const isStaticAsset = /\.(js|css|woff2?|ttf|svg|png|jpe?g|gif|ico|webmanifest|map)(\?|$)/i.test(u.pathname);
+if (!isStaticAsset) delete req.headers["accept-encoding"];
+```
+
+## 五、修复后实测（已生效）
+
+| 项目 | 修复前 | 修复后 |
+|---|---|---|
+| 静态资源大小 | 740KB 明文 | **209KB gzip（-72%）** |
+| 经 ngrok 公网下载 | 1.1s / 665KB/s | **0.56s**（流量 -72%） |
+| HTML 页面 | 明文 + polyfill 注入 | 不变（安全） |
+
+- proxy 已热重启（PID 36764，旧 28128 已停），**dsh 3080 未动、会话无中断**
+- `node --check` 通过
+
+## 六、剩余说明
+
+- ngrok free 带宽上限（~5Mbps）仍是非热点文件（如大图）的固有瓶颈；若要更快可考虑付费 ngrok / 自建 frp / Cloudflare Tunnel
+- 手机浏览器首次首屏仍会拉 ~4.5MB（压缩后 ~1.3MB），二次访问有缓存会明显变快
+- 若手机端仍慢：优先检查 4G 信号；其次可尝试把 ngrok region 换成 ap（`ngrok http 3200 --region=ap ...`）
+## 七、9/22 追加审核：发现并修复复合 bundle 漏压缩 + 验证 2 分钟重试补丁生效
+
+### 1) 复合 bundle 漏压缩（二次修复，当日补）
+
+首屏实际引用多个复合 JS bundle：`/plugins/??@deepseek-ai/…/client.js&rev=…`——URL 里 `?` 使
+`new URL(req.url).pathname` 截断为 `/plugins/`（无扩展名），首版正则按 pathname 判断把
+这类请求误判为 HTML → 剥离 Accept-Encoding → 复合 bundle 也明文传输（漏压缩）。
+
+**修复**：判定改用完整 `req.url`（含 query），匹配 `.js/.mjs/.cjs/.css/woff/ttf/svg/png…`
+扩展名后随 `? , &` 或行尾即视为静态资源。
+
+实测（修复后）：`/plugins/??…client.js&rev=…` → `200 + Content-Encoding: gzip` ✅
+HTML 根页仍明文 + polyfill 注入正常 ✅（见下方 3 的完整链路验证）
+
+### 2) dsh-remote 复核结论（2026-09-22）
+
+- **git 安全**：.gitignore 已排除 config.json（含 ngrok token）、proxy/dsh_token.txt、ngrok/、proxy/node_modules——机密不入库 ✅
+- **watchdog**：PID 41800 自 9/19 常驻运行，单实例锁正常（多开自动退让）；9/19 22:13 与 9/20 15:05 两次自动恢复均有日志 ✅
+- **launcher**：proxy 与 dsh web 均强制重启保证新代码生效；dsh web 前台阻塞、关窗即关 dsh 符合预期 ✅
+- **proxy 认证**：cookie 会话 24h + 失败 5 次延迟 1s 防爆破 + timingSafeEqual + 每请求读 dsh_token.txt 换票（token 轮换无需重启 proxy）✅
+
+### 3) 2 分钟自动重试补丁——实证生效（回应"2 会话未完成没重试"）
+
+结论：**补丁已生效，9/21 白天的失败会话发生在补丁就位/重启之前，属预期行为。**
+
+实证（会话日志 dump，时间为 UTC，北京 = +8）：
+- 9/21 白天 turn 59-65 过载失败（15:04-18:55 北京）——**早于补丁写入（18:48）与 dsh 重启（19:19）**，旧进程无补丁 → 不重试 ⇒ 符合预期
+- **9/21 19:30（dsh 重启后）turn 66 过载**：日志记录 `llm/retry delayMs=120000`（正好 2 分钟）→ 19:32 `llm/retry-started` → **19:34 turn 完成（重试成功）** ✅
+- 9/21 19:47 会话（239d79ab）另有 2 次 llm/retry ✅
+- `sessionProjections llmRetry` 键正确持久化（重试计数可跨断点续）
+
+**结论**：2 分钟过载自循环工作正常。若想再看一次重试触发点，跑一个 codex 会话撞到
+overload 时留意 `llm/retry` 事件即可；平时无过载不会触发（正常）。
+
+
+

@@ -288,9 +288,15 @@ const server = http.createServer((req, res) => {
 
   // 已认证 → 转发；剥离 Origin：让 fence 走"无 Origin → 放行"分支（Host 白名单校验仍在）
   delete req.headers.origin;
-  // 剥离 Accept-Encoding：dsh 上游在远程访问场景会回 gzip。polyfill 注入依赖明文 HTML，
-  // 压缩流注入会损坏响应（手机端即表现为连接中断/超时）——强制上游明文后再注入。
-  delete req.headers['accept-encoding'];
+  // 压缩策略：仅 HTML 页面请求剥离 Accept-Encoding（polyfill 注入依赖明文 HTML，压缩流注入
+  // 会损坏响应——手机端即表现为连接中断/超时）。静态资源（JS/CSS/字体/图等）保留
+  // Accept-Encoding，让 dsh 上游 gzip/br 压缩（实测 740KB→~210KB，约 -72%）后原样透传，
+  // 手机 4G 流量与加载时间大幅下降。
+  // 注意用 req.url 而非 u.pathname 判断：复合 bundle 形如 /plugins/??a.js,b.js&rev=...，
+  // 其中 '?' 让 u.pathname 截断为 /plugins/（不含 .js），会误判为 HTML；完整 URL 上
+  // 的 .js/.css 等扩展名（后随 ? , & 或行尾）才是静态资源。
+  const isStaticAsset = /\.(js|mjs|cjs|css|woff2?|ttf|eot|svg|png|jpe?g|gif|ico|webmanifest|map)(?:[?,&]|$)/i.test(req.url);
+  if (!isStaticAsset) delete req.headers['accept-encoding'];
   proxy.web(req, res, { target: TARGET }, (err) => {
     res.writeHead(502);
     res.end('proxy error: ' + err.message);
