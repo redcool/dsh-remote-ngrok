@@ -11,10 +11,15 @@
 //      302 回干净 /）——不复制 dsh 内部 cookie 格式，天然兼容 dsh 版本升级。
 //      token 来源：start_remote_all(.ps1/.bat/.sh) 启动 dsh web 时捕获其打印的 URL 写入
 //      proxy/dsh_token.txt；环境变量 DSH_PROXY_DSH_TOKEN 可覆盖。
-//   6. 上游 gzip 处理：dsh 上游在远程访问场景会把 HTML 回成 gzip/br；注入 polyfill 必须在
-//      明文上做（对压缩流注入会破坏响应，手机表现为连接中断）。故转发前剥离 Accept-Encoding，
-//      html 分支再防御性解压（content-encoding: gzip/br/deflate → 明文），并去掉
-//      content-encoding/vary 后以 chunked 明文回包。
+//   6. 压缩与编码处理：polyfill 注入必须在明文 HTML 上做（对压缩流注入会破坏响应，手机表现为
+//      连接中断）。故仅对 HTML 页面请求剥离 Accept-Encoding（上游回明文），html 分支再防御性
+//      解压（content-encoding: gzip/br/deflate → 明文）并去掉 content-encoding/vary 后以
+//      chunked 明文回包；静态资源（JS/CSS/字体/图，含 /plugins/?? 多包合包）保留 Accept-Encoding
+//      原样透传——上游 gzip/br 压缩后直通（实测 12.3MB 合包 → 4.7MB gzip，隧道 5s）。
+//   7. 指纹（rev）防过期：dsh 前端 bundle 按内容指纹 rev 内容寻址（index 引用
+//      /plugins/??...&rev=<hash>；dsh 重启/升级后 rev 会变）。index 若不禁止缓存会被浏览器/边缘
+//      缓存 → 手机请求旧 rev → 404 → "Failed to load plugins"。html 分支强制回
+//      cache-control: no-store，每次都拿当前 index / 当前 rev。
 // 适配版本基线：@deepseek-ai/dsh 系列（dsh / dsh-client-connection / dsh-web-frontend /
 //      dsh-web-app）0.1.2-rc.1（2026-09-07 实测）。耦合点清单与 dsh 升级后的再适配指引
 //      见 dsh-remote/README.md §13（§13.4 runbook：升级后 ~10 分钟自查）。
@@ -345,6 +350,11 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
       delete headers['connection'];              // hop-by-hop，交由本机 Node 决定
       delete headers['content-encoding'];        // 已解压为明文
       delete headers['vary'];                    // 恒回明文，不再有 AE 变体
+      // 指纹（rev）防过期：dsh 前端 bundle 按内容指纹 rev 内容寻址（index 里 /plugins/??...&rev=<hash>），
+      // dsh 重启/升级后 rev 会变。index 若不禁止缓存，浏览器/边缘会启发式缓存旧 index → 手机一直请求
+      // 旧 rev → 上游回 404/错误文本 → loader 报 "bundle script ... failed to load"（页面上即
+      // "Failed to load plugins"）。强制 no-store：每次访问都拿到当前 index / 当前 rev。
+      headers['cache-control'] = 'no-store';
       // 不再重算 content-length：不写 Content-Length + res.end() → Node 自动用 Transfer-Encoding: chunked
       // 回包（浏览器同样正确读全，且实测 chunked 走 ngrok 隧道稳定；写死长度反而会在代理/隧道链路触发帧错乱）。
       res.writeHead(proxyRes.statusCode, headers);
